@@ -1,0 +1,2 @@
+C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\bin\Release\net10.0\wasi-wasm\publish\StdbModule.wasm
+C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\bin\Release\net10.0\wasi-wasm\publish\StdbModule.deps.json

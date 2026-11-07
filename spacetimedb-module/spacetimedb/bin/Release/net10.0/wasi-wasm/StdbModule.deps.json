@@ -1,0 +1,67 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0/wasi-wasm",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {},
+    ".NETCoreApp,Version=v10.0/wasi-wasm": {
+      "StdbModule/1.0.0": {
+        "dependencies": {
+          "SpacetimeDB.Runtime": "2.14.1"
+        },
+        "runtime": {
+          "StdbModule.dll": {}
+        }
+      },
+      "SpacetimeDB.BSATN.Runtime/2.14.1": {
+        "runtime": {
+          "lib/net10.0/SpacetimeDB.BSATN.Runtime.dll": {
+            "assemblyVersion": "2.14.1.0",
+            "fileVersion": "2.14.1.0"
+          }
+        }
+      },
+      "SpacetimeDB.Runtime/2.14.1": {
+        "dependencies": {
+          "SpacetimeDB.BSATN.Runtime": "2.14.1"
+        },
+        "runtime": {
+          "lib/net10.0/SpacetimeDB.Runtime.dll": {
+            "assemblyVersion": "2.14.1.0",
+            "fileVersion": "2.14.1.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "StdbModule/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "SpacetimeDB.BSATN.Runtime/2.14.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-7LNoM3iFTAJLlq+41fkuW24luIpTDcJVEEEECc4HvwsbijiZO4cZ/y6HQQgQaH4tseJ/pzsTXSNZITgfUtxhNg==",
+      "path": "spacetimedb.bsatn.runtime/2.14.1",
+      "hashPath": "spacetimedb.bsatn.runtime.2.14.1.nupkg.sha512"
+    },
+    "SpacetimeDB.Runtime/2.14.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-jpPetThdB0RPJIjwWV3jO6jBWXVhSfMZZrTNXE/P+4IyYmzL3TvvAAdYk/uAEyDmkDHxu2635uNfNoLuwNZcTg==",
+      "path": "spacetimedb.runtime/2.14.1",
+      "hashPath": "spacetimedb.runtime.2.14.1.nupkg.sha512"
+    }
+  },
+  "runtimes": {
+    "wasi-wasm": [
+      "wasi",
+      "any",
+      "base"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <Import Project="$(NuGetPackageRoot)microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1\build\Microsoft.DotNet.ILCompiler.LLVM.targets" Condition="Exists('$(NuGetPackageRoot)microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1\build\Microsoft.DotNet.ILCompiler.LLVM.targets')" />
+    <Import Project="$(NuGetPackageRoot)spacetimedb.runtime\2.14.1\build\SpacetimeDB.Runtime.targets" Condition="Exists('$(NuGetPackageRoot)spacetimedb.runtime\2.14.1\build\SpacetimeDB.Runtime.targets')" />
+  </ImportGroup>
+</Project>

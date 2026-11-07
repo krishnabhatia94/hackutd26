@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dgSpecHash": "PLpHbn5rweM=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\krishna\\Documents\\hackutd26\\spacetimedb-module\\spacetimedb\\StdbModule.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\krishna\\.nuget\\packages\\microsoft.dotnet.ilcompiler.llvm\\10.0.0-rc.1.26357.1\\microsoft.dotnet.ilcompiler.llvm.10.0.0-rc.1.26357.1.nupkg.sha512",
+    "C:\\Users\\krishna\\.nuget\\packages\\microsoft.net.illink.tasks\\10.0.14\\microsoft.net.illink.tasks.10.0.14.nupkg.sha512",
+    "C:\\Users\\krishna\\.nuget\\packages\\runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm\\10.0.0-rc.1.26357.1\\runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm.10.0.0-rc.1.26357.1.nupkg.sha512",
+    "C:\\Users\\krishna\\.nuget\\packages\\runtime.wasi-wasm.microsoft.dotnet.ilcompiler.llvm\\10.0.0-rc.1.26357.1\\runtime.wasi-wasm.microsoft.dotnet.ilcompiler.llvm.10.0.0-rc.1.26357.1.nupkg.sha512",
+    "C:\\Users\\krishna\\.nuget\\packages\\runtime.win-x64.microsoft.dotnet.ilcompiler.llvm\\10.0.0-rc.1.26357.1\\runtime.win-x64.microsoft.dotnet.ilcompiler.llvm.10.0.0-rc.1.26357.1.nupkg.sha512",
+    "C:\\Users\\krishna\\.nuget\\packages\\spacetimedb.bsatn.runtime\\2.14.1\\spacetimedb.bsatn.runtime.2.14.1.nupkg.sha512",
+    "C:\\Users\\krishna\\.nuget\\packages\\spacetimedb.runtime\\2.14.1\\spacetimedb.runtime.2.14.1.nupkg.sha512"
+  ],
+  "logs": []
+}

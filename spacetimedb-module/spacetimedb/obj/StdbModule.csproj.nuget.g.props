@@ -1,0 +1,26 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <RestoreSuccess Condition=" '$(RestoreSuccess)' == '' ">True</RestoreSuccess>
+    <RestoreTool Condition=" '$(RestoreTool)' == '' ">NuGet</RestoreTool>
+    <ProjectAssetsFile Condition=" '$(ProjectAssetsFile)' == '' ">$(MSBuildThisFileDirectory)project.assets.json</ProjectAssetsFile>
+    <NuGetPackageRoot Condition=" '$(NuGetPackageRoot)' == '' ">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
+    <NuGetPackageFolders Condition=" '$(NuGetPackageFolders)' == '' ">C:\Users\krishna\.nuget\packages\</NuGetPackageFolders>
+    <NuGetProjectStyle Condition=" '$(NuGetProjectStyle)' == '' ">PackageReference</NuGetProjectStyle>
+    <NuGetToolVersion Condition=" '$(NuGetToolVersion)' == '' ">7.0.0</NuGetToolVersion>
+  </PropertyGroup>
+  <ItemGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <SourceRoot Include="C:\Users\krishna\.nuget\packages\" />
+  </ItemGroup>
+  <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <Import Project="$(NuGetPackageRoot)microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1\build\Microsoft.DotNet.ILCompiler.LLVM.props" Condition="Exists('$(NuGetPackageRoot)microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1\build\Microsoft.DotNet.ILCompiler.LLVM.props')" />
+    <Import Project="$(NuGetPackageRoot)spacetimedb.runtime\2.14.1\build\SpacetimeDB.Runtime.props" Condition="Exists('$(NuGetPackageRoot)spacetimedb.runtime\2.14.1\build\SpacetimeDB.Runtime.props')" />
+    <Import Project="$(NuGetPackageRoot)microsoft.net.illink.tasks\10.0.14\build\Microsoft.NET.ILLink.Tasks.props" Condition="Exists('$(NuGetPackageRoot)microsoft.net.illink.tasks\10.0.14\build\Microsoft.NET.ILLink.Tasks.props')" />
+  </ImportGroup>
+  <PropertyGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
+    <Pkgruntime_linux-x64_Microsoft_DotNet_ILCompiler_LLVM Condition=" '$(Pkgruntime_linux-x64_Microsoft_DotNet_ILCompiler_LLVM)' == '' ">C:\Users\krishna\.nuget\packages\runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1</Pkgruntime_linux-x64_Microsoft_DotNet_ILCompiler_LLVM>
+    <PkgMicrosoft_DotNet_ILCompiler_LLVM Condition=" '$(PkgMicrosoft_DotNet_ILCompiler_LLVM)' == '' ">C:\Users\krishna\.nuget\packages\microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1</PkgMicrosoft_DotNet_ILCompiler_LLVM>
+    <Pkgruntime_win-x64_Microsoft_DotNet_ILCompiler_LLVM Condition=" '$(Pkgruntime_win-x64_Microsoft_DotNet_ILCompiler_LLVM)' == '' ">C:\Users\krishna\.nuget\packages\runtime.win-x64.microsoft.dotnet.ilcompiler.llvm\10.0.0-rc.1.26357.1</Pkgruntime_win-x64_Microsoft_DotNet_ILCompiler_LLVM>
+    <PkgMicrosoft_NET_ILLink_Tasks Condition=" '$(PkgMicrosoft_NET_ILLink_Tasks)' == '' ">C:\Users\krishna\.nuget\packages\microsoft.net.illink.tasks\10.0.14</PkgMicrosoft_NET_ILLink_Tasks>
+  </PropertyGroup>
+</Project>
