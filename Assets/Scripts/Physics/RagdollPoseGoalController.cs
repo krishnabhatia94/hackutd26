@@ -179,6 +179,12 @@ namespace Physics
             currentGoalPoseName = "Upright Standing T-Pose (Default)";
             currentStepId = 0;
 
+            var pickupCtrl = GetComponent<ObjectPickupController>();
+            if (pickupCtrl != null)
+            {
+                pickupCtrl.ReleaseHeldObject();
+            }
+
             foreach (var kvp in _boneMap)
             {
                 string name = kvp.Key;

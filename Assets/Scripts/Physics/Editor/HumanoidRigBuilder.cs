@@ -217,6 +217,7 @@ namespace Physics.Editor
             // Attach controllers to NPC root
             var goalController = root.AddComponent<RagdollPoseGoalController>();
             var queueManager = root.AddComponent<DynamicPoseQueueManager>();
+            var pickupController = root.AddComponent<ObjectPickupController>();
             var rigController = root.AddComponent<SpacetimeRigController>();
             rigController.serverUrl = "https://maincloud.spacetimedb.com";
             rigController.databaseName = "knet";
@@ -224,6 +225,9 @@ namespace Physics.Editor
             rigController.telemetryInterval = 0.1f;
             rigController.poseGoalController = goalController;
             rigController.queueManager = queueManager;
+
+            var faceController = root.AddComponent<RagdollFaceController>();
+            faceController.InitializeReferences();
 
             // Setup Main Camera for optimal framing
             Camera mainCam = Camera.main;

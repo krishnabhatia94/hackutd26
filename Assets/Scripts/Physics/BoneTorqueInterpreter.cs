@@ -35,7 +35,7 @@ namespace Physics
 
         [Header("Limits & Settings")]
         [Tooltip("Maximum drive force/torque magnitude. Clamps extreme spikes.")]
-        public float maxTorque = 100000f;
+        public float maxTorque = 300000f;
 
         [Tooltip("Maximum angular velocity of setpoint transition in degrees/second. Prevents instant mechanical snapping.")]
         public float maxAngularSpeed = 360f;
@@ -137,11 +137,12 @@ namespace Physics
         {
             if (_joint == null) return;
 
+            float effectiveMaxForce = Mathf.Max(maxTorque, kp * 3f);
             JointDrive drive = new JointDrive
             {
                 positionSpring = kp,
                 positionDamper = kd,
-                maximumForce = maxTorque
+                maximumForce = effectiveMaxForce
             };
             _joint.slerpDrive = drive;
         }

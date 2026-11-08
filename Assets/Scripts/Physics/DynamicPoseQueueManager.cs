@@ -24,6 +24,8 @@ namespace Physics
         public float targetDuration = 0.35f;
         public float maxWatchdogTimeout = 0.75f;
         public Dictionary<string, BoneWaypointData> boneTargets = new();
+        public Vector3 rootDisplacement = Vector3.zero;
+        public bool hasRootDisplacement = false;
     }
 
     /// <summary>
@@ -64,6 +66,12 @@ namespace Physics
         public float holdingKp = 25000f;
         public float holdingKd = 2000f;
 
+        [Header("Locomotion Pelvis Drive")]
+        [Tooltip("Speed (m/s) at which the pelvis locomotion suspension anchor moves across the floor.")]
+        public float locomotionSpeed = 1.25f;
+        public Vector3 currentPelvisAnchor => _currentPelvisAnchor;
+        public Vector3 targetPelvisAnchor => _targetPelvisAnchor;
+
         [Header("Live Queue Telemetry (Read-Only)")]
         public bool isExecuting = false;
         public string activeActionName = "";
@@ -87,11 +95,37 @@ namespace Physics
         private TrajectoryWaypoint _activeWaypoint = null;
         private Dictionary<string, BoneTorqueInterpreter> _boneMap = new();
         private RagdollPoseGoalController _goalController;
+        private ObjectPickupController _pickupController;
         private float _stallTimer = 0f;
+
+        private ConfigurableJoint _pelvisJoint;
+        private Vector3 _initialPelvisAnchor = Vector3.zero;
+        private Vector3 _currentPelvisAnchor = Vector3.zero;
+        private Vector3 _targetPelvisAnchor = Vector3.zero;
+        private bool _isLocomoting = false;
 
         private void Awake()
         {
+            isExecuting = false;
+            isHolding = false;
+            holdingPose = null;
+            activeActionName = "";
+            activeStepId = 0;
+            currentWaypointIndex = 0;
+            totalWaypointsInQueue = 0;
+            currentWaypointName = "";
+            currentWaypointTimer = 0f;
+            isStalledByObstacle = false;
+            stalledBoneName = "";
+            _waypointQueue.Clear();
+            _activeWaypoint = null;
+
             _goalController = GetComponent<RagdollPoseGoalController>();
+            _pickupController = GetComponent<ObjectPickupController>();
+            if (_pickupController == null)
+            {
+                _pickupController = gameObject.AddComponent<ObjectPickupController>();
+            }
             IndexBoneControllers();
         }
 
@@ -104,6 +138,46 @@ namespace Physics
                 string key = string.IsNullOrEmpty(bti.boneName) ? bti.gameObject.name : bti.boneName;
                 _boneMap[key] = bti;
             }
+
+            if (_pelvisJoint == null)
+            {
+                Transform pelvisTr = transform.Find("Pelvis");
+                if (pelvisTr == null)
+                {
+                    var rbs = GetComponentsInChildren<Rigidbody>(true);
+                    foreach (var rb in rbs)
+                    {
+                        if (rb.name == "Pelvis") { pelvisTr = rb.transform; break; }
+                    }
+                }
+                if (pelvisTr != null)
+                {
+                    _pelvisJoint = pelvisTr.GetComponent<ConfigurableJoint>();
+                    if (_pelvisJoint != null)
+                    {
+                        _pelvisJoint.autoConfigureConnectedAnchor = false;
+                        if (_initialPelvisAnchor == Vector3.zero)
+                        {
+                            _initialPelvisAnchor = _pelvisJoint.connectedAnchor;
+                            if (_initialPelvisAnchor == Vector3.zero)
+                            {
+                                _initialPelvisAnchor = pelvisTr.position;
+                                _pelvisJoint.connectedAnchor = _initialPelvisAnchor;
+                            }
+                            _currentPelvisAnchor = _initialPelvisAnchor;
+                            _targetPelvisAnchor = _initialPelvisAnchor;
+                        }
+                    }
+                }
+            }
+        }
+
+        public BoneTorqueInterpreter GetInterpreterForBone(string boneName)
+        {
+            if (_boneMap.TryGetValue(boneName, out var interp)) return interp;
+            if (boneName == "LeftShoulder" && _boneMap.TryGetValue("LeftUpperArm", out var lua)) return lua;
+            if (boneName == "RightShoulder" && _boneMap.TryGetValue("RightUpperArm", out var rua)) return rua;
+            return null;
         }
 
         private void FixedUpdate()
@@ -113,6 +187,13 @@ namespace Physics
                 IndexBoneControllers();
             }
 
+            // Smoothly advance the pelvis locomotion suspension anchor
+            if (_pelvisJoint != null && (_currentPelvisAnchor != _targetPelvisAnchor || _isLocomoting))
+            {
+                _currentPelvisAnchor = Vector3.MoveTowards(_currentPelvisAnchor, _targetPelvisAnchor, locomotionSpeed * Time.fixedDeltaTime);
+                _pelvisJoint.connectedAnchor = _currentPelvisAnchor;
+            }
+
             // Active Holding Loop: Constantly enforce final setpoint and compute error
             if (isHolding && holdingPose != null)
             {
@@ -120,7 +201,8 @@ namespace Physics
                 float holdMaxSpd = 0f;
                 foreach (var kvp in holdingPose.boneTargets)
                 {
-                    if (_boneMap.TryGetValue(kvp.Key, out var interp))
+                    var interp = GetInterpreterForBone(kvp.Key);
+                    if (interp != null)
                     {
                         float err = interp.CurrentAngularError;
                         float spd = interp.CurrentAngularSpeed;
@@ -145,7 +227,8 @@ namespace Physics
             foreach (var kvp in _activeWaypoint.boneTargets)
             {
                 string bname = kvp.Key;
-                if (_boneMap.TryGetValue(bname, out var interp))
+                var interp = GetInterpreterForBone(bname);
+                if (interp != null)
                 {
                     float err = interp.CurrentAngularError;
                     float spd = interp.CurrentAngularSpeed;
@@ -230,21 +313,25 @@ namespace Physics
             _activeWaypoint = null;
             currentWaypointName = $"Holding Final Pose: {finalWp.stepName}";
 
-            // Firmly lock all final waypoint bone targets with critical damping and holding stiffness
+            // Firmly lock all final waypoint bone targets with critical damping and anatomical holding stiffness
+            _isLocomoting = false;
             foreach (var kvp in finalWp.boneTargets)
             {
                 string bname = kvp.Key;
                 var bdata = kvp.Value;
-                if (_boneMap.TryGetValue(bname, out var interp))
+                var interp = GetInterpreterForBone(bname);
+                if (interp != null)
                 {
-                    float kp = Mathf.Max(bdata.kp, holdingKp);
-                    float kd = Mathf.Max(bdata.kd, holdingKd);
+                    float kp = GetAnatomicalDefaultKp(bname, bdata.kp);
+                    float kd = GetAnatomicalDefaultKd(bname, bdata.kd);
                     interp.SetTargetAndGains(bdata.pitch, bdata.yaw, bdata.roll, kp, kd);
                     interp.applyTorque = true;
                 }
                 if (_goalController != null)
                 {
-                    _goalController.UpdateGoalBoneTarget(bname, bdata.pitch, bdata.yaw, bdata.roll, holdingKp, holdingKd, activeStepId);
+                    float targetKp = GetAnatomicalDefaultKp(bname, bdata.kp);
+                    float targetKd = GetAnatomicalDefaultKd(bname, bdata.kd);
+                    _goalController.UpdateGoalBoneTarget(bname, bdata.pitch, bdata.yaw, bdata.roll, targetKp, targetKd, activeStepId);
                 }
             }
 
@@ -270,7 +357,8 @@ namespace Physics
                 {
                     string bname = kvp.Key;
                     var bdata = kvp.Value;
-                    if (_boneMap.TryGetValue(bname, out var interp))
+                    var interp = GetInterpreterForBone(bname);
+                    if (interp != null)
                     {
                         interp.SetTargetAndGains(bdata.pitch, bdata.yaw, bdata.roll, bdata.kp, bdata.kd);
                         interp.applyTorque = true;
@@ -283,6 +371,50 @@ namespace Physics
 
                 Debug.Log($"[DynamicPoseQueue] Advanced to [{currentWaypointIndex}/{totalWaypointsInQueue}]: {_activeWaypoint.stepName}");
                 OnWaypointStarted?.Invoke(_activeWaypoint.stepName, currentWaypointIndex, totalWaypointsInQueue);
+
+                // Auto-trigger physical pickup/grasp if this waypoint is grasping or lifting
+                string stepLower = _activeWaypoint.stepName.ToLower();
+                if (stepLower.Contains("grasp") || stepLower.Contains("pickup") || stepLower.Contains("pick up") || stepLower.Contains("lift") || stepLower.Contains("clasp"))
+                {
+                    if (_pickupController != null && !_pickupController.isHolding)
+                    {
+                        _pickupController.TryPickupNearestInteractable();
+                    }
+                }
+                else if (stepLower.Contains("throw") || stepLower.Contains("release") || stepLower.Contains("launch") || stepLower.Contains("toss") || stepLower.Contains("drop") || stepLower.Contains("hurl") || stepLower.Contains("pitch") || stepLower.Contains("fling") || stepLower.Contains("pass"))
+                {
+                    if (_pickupController != null && _pickupController.isHolding)
+                    {
+                        Vector3 throwDir;
+                        if (_pickupController.opponentTarget != null)
+                        {
+                            Vector3 targetPos = _pickupController.opponentTarget.position + Vector3.up * 0.2f;
+                            Vector3 origin = transform.position + Vector3.up * 1.2f;
+                            throwDir = (targetPos - origin).normalized;
+                            throwDir = (throwDir + Vector3.up * 0.12f).normalized;
+                        }
+                        else
+                        {
+                            Vector3 fwd = transform.forward;
+                            throwDir = (fwd + Vector3.up * 0.22f).normalized;
+                        }
+
+                        float speed = (stepLower.Contains("drop")) ? 1.0f : ((stepLower.Contains("power") || stepLower.Contains("hurl") || stepLower.Contains("explosive")) ? 13.5f : _pickupController.defaultThrowSpeed);
+                        _pickupController.ReleaseHeldObject(throwDir * speed);
+                    }
+                }
+
+                // Advance locomotion pelvis anchor if root displacement is specified or walking action
+                if (_activeWaypoint.hasRootDisplacement && _activeWaypoint.rootDisplacement != Vector3.zero)
+                {
+                    _targetPelvisAnchor += transform.TransformDirection(_activeWaypoint.rootDisplacement);
+                    _isLocomoting = true;
+                }
+                else if (activeActionName.ToLower().Contains("walk") || activeActionName.ToLower().Contains("step") || activeActionName.ToLower().Contains("stride") || activeActionName.ToLower().Contains("approach"))
+                {
+                    _targetPelvisAnchor += transform.forward * 0.25f;
+                    _isLocomoting = true;
+                }
             }
             else
             {
@@ -303,19 +435,42 @@ namespace Physics
         public void StopAndResetToTPose()
         {
             isExecuting = false;
-            isHolding = false;
-            holdingPose = null;
             _activeWaypoint = null;
             _waypointQueue.Clear();
-            currentWaypointName = "Upright Standing T-Pose (Default)";
             currentWaypointIndex = 0;
             totalWaypointsInQueue = 0;
             currentWaypointTimer = 0f;
+            _isLocomoting = false;
+
+            if (_pickupController != null)
+            {
+                _pickupController.ReleaseHeldObject();
+            }
+
+            if (_pelvisJoint != null && _initialPelvisAnchor != Vector3.zero)
+            {
+                _targetPelvisAnchor = _initialPelvisAnchor;
+                _currentPelvisAnchor = _initialPelvisAnchor;
+                _pelvisJoint.connectedAnchor = _initialPelvisAnchor;
+
+                var rbs = GetComponentsInChildren<Rigidbody>();
+                foreach (var rb in rbs)
+                {
+                    rb.velocity = Vector3.zero;
+                    rb.angularVelocity = Vector3.zero;
+                }
+            }
 
             if (_boneMap == null || _boneMap.Count == 0)
             {
                 IndexBoneControllers();
             }
+
+            var tPose = new TrajectoryWaypoint
+            {
+                stepName = "Upright Standing T-Pose (Default)",
+                targetDuration = 0.35f
+            };
 
             foreach (var kvp in _boneMap)
             {
@@ -323,13 +478,62 @@ namespace Physics
                 var interp = kvp.Value;
                 if (interp != null)
                 {
-                    float kp = (bname == "Pelvis" || bname == "Spine" || bname == "Chest") ? 25000f : 20000f;
-                    float kd = (bname == "Pelvis" || bname == "Spine" || bname == "Chest") ? 1500f : 1000f;
+                    float kp = GetAnatomicalDefaultKp(bname, 25000f);
+                    float kd = GetAnatomicalDefaultKd(bname, 1500f);
                     interp.SetTargetAndGains(0f, 0f, 0f, kp, kd);
                     interp.applyTorque = true;
+
+                    tPose.boneTargets[bname] = new BoneWaypointData
+                    {
+                        boneName = bname,
+                        pitch = 0f,
+                        yaw = 0f,
+                        roll = 0f,
+                        kp = kp,
+                        kd = kd
+                    };
                 }
             }
-            Debug.Log("[DynamicPoseQueue] Stopped active queue and reset humanoid rig to Upright Standing T-Pose.");
+
+            isHolding = true;
+            holdingPose = tPose;
+            currentWaypointName = "Upright Standing T-Pose (Holding)";
+
+            Debug.Log("[DynamicPoseQueue] Stopped active queue and firmly locked humanoid rig into Upright Standing T-Pose.");
+        }
+
+        public static float GetAnatomicalDefaultKp(string boneName, float requestedKp)
+        {
+            float minKp;
+            switch (boneName)
+            {
+                case "Spine": minKp = 100000f; break;
+                case "Pelvis": minKp = 60000f; break;
+                case "Chest": minKp = 45000f; break;
+                case "LeftThigh":
+                case "RightThigh": minKp = 40000f; break;
+                case "LeftCalf":
+                case "RightCalf": minKp = 35000f; break;
+                default: minKp = 25000f; break;
+            }
+            return Mathf.Max(requestedKp, minKp);
+        }
+
+        public static float GetAnatomicalDefaultKd(string boneName, float requestedKd)
+        {
+            float minKd;
+            switch (boneName)
+            {
+                case "Spine": minKd = 5000f; break;
+                case "Pelvis": minKd = 3500f; break;
+                case "Chest": minKd = 2500f; break;
+                case "LeftThigh":
+                case "RightThigh": minKd = 2500f; break;
+                case "LeftCalf":
+                case "RightCalf": minKd = 2000f; break;
+                default: minKd = 1500f; break;
+            }
+            return Mathf.Max(requestedKd, minKd);
         }
 
         public bool EnqueueTrajectoryFromJson(string actionName, string jsonPayload, uint stepId = 0)
@@ -381,7 +585,8 @@ namespace Physics
             string[] validBones = new string[] {
                 "Pelvis", "Spine", "Chest", "Head",
                 "LeftUpperArm", "LeftForearm", "RightUpperArm", "RightForearm",
-                "LeftThigh", "LeftCalf", "RightThigh", "RightCalf"
+                "LeftThigh", "LeftCalf", "RightThigh", "RightCalf",
+                "LeftShoulder", "RightShoulder"
             };
 
             foreach (Match kfMatch in kfMatches)
@@ -425,6 +630,17 @@ namespace Physics
 
                         wp.boneTargets[bname] = bData;
                     }
+                }
+
+                // Parse optional root displacement: "root_displacement": [x, y, z]
+                var rootMatch = Regex.Match(block, @"""root_displacement""\s*:\s*\[([+-]?[0-9.]+),\s*([+-]?[0-9.]+),\s*([+-]?[0-9.]+)\]");
+                if (rootMatch.Success)
+                {
+                    float.TryParse(rootMatch.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out float rx);
+                    float.TryParse(rootMatch.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out float ry);
+                    float.TryParse(rootMatch.Groups[3].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out float rz);
+                    wp.rootDisplacement = new Vector3(rx, ry, rz);
+                    wp.hasRootDisplacement = true;
                 }
 
                 if (wp.boneTargets.Count > 0)

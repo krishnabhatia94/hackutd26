@@ -205,7 +205,7 @@ namespace UI
             cb.pressedColor = new Color(0.65f, 0.15f, 0.12f, 1f);
             shoveButton.colors = cb;
 
-            GameObject btnTextGo = CreateTextObject(btnGo, "BtnText", "SHOVE NPC / SPAWN OBSTACLE", defaultFont, 14, FontStyle.Bold, Color.white);
+            GameObject btnTextGo = CreateTextObject(btnGo, "BtnText", "SHOOT PROJECTILE AT DUMMY", defaultFont, 14, FontStyle.Bold, Color.white);
             RectTransform btRect = btnTextGo.GetComponent<RectTransform>();
             btRect.anchorMin = Vector2.zero;
             btRect.anchorMax = Vector2.one;

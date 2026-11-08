@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using UnityEngine;
 using SpacetimeDB;
 using SpacetimeDB.Types;
@@ -71,6 +72,7 @@ namespace Physics
         [Tooltip("Dynamic physics-driven pose queue controller")]
         public DynamicPoseQueueManager queueManager;
 
+        private ObjectPickupController _pickupController;
         private Rigidbody _chestRb;
         private Transform _leftCalfTransform;
         private Transform _rightCalfTransform;
@@ -134,6 +136,16 @@ namespace Physics
             {
                 _pelvisTransform = transform;
             }
+
+            // Ensure all bone colliders on this humanoid ignore each other to eliminate internal PhysX depenetration forces
+            var allColliders = GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < allColliders.Length; i++)
+            {
+                for (int j = i + 1; j < allColliders.Length; j++)
+                {
+                    UnityEngine.Physics.IgnoreCollision(allColliders[i], allColliders[j], true);
+                }
+            }
         }
 
         private void Start()
@@ -180,7 +192,7 @@ namespace Physics
             }
         }
 
-        private void OnConnected(DbConnection conn, Identity identity, string authToken)
+        private void OnConnected(DbConnection conn, SpacetimeDB.Identity identity, string authToken)
         {
             isConnected = true;
             Debug.Log($"[SpacetimeRigController] Connected successfully! Identity: {identity}");
@@ -333,8 +345,8 @@ namespace Physics
                 foreach (var kvp in _boneMap)
                 {
                     string bname = kvp.Key;
-                    float kp = (bname == "Pelvis" || bname == "Spine" || bname == "Chest") ? 25000f : 20000f;
-                    float kd = (bname == "Pelvis" || bname == "Spine" || bname == "Chest") ? 1500f : 1000f;
+                    float kp = DynamicPoseQueueManager.GetAnatomicalDefaultKp(bname, 25000f);
+                    float kd = DynamicPoseQueueManager.GetAnatomicalDefaultKd(bname, 1500f);
                     try
                     {
                         _conn.Reducers.SetPoseKeyframe(bname, 0f, 0f, 0f, kp, kd, 0);
@@ -399,7 +411,89 @@ namespace Physics
                 {
                     _telemetryTimer = 0f;
                     CalculateAndSendTelemetry();
+                    SyncInteractableObjects();
                 }
+            }
+        }
+
+        private float _lastInteractableSyncTime = 0f;
+
+        private void SyncInteractableObjects()
+        {
+            if (_conn == null || !isConnected) return;
+            if (Time.time - _lastInteractableSyncTime < 0.4f) return;
+            _lastInteractableSyncTime = Time.time;
+
+            if (_pickupController == null)
+            {
+                _pickupController = GetComponent<ObjectPickupController>();
+            }
+
+            Transform refTr = _pelvisTransform != null ? _pelvisTransform : transform;
+            var interactables = InteractableObject.AllInteractables;
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append("[");
+
+            bool first = true;
+            if (interactables != null && interactables.Count > 0)
+            {
+                foreach (var obj in interactables)
+                {
+                    if (obj == null) continue;
+                    var (offset, dist, bearing) = obj.GetTelemetryRelativeTo(refTr);
+                    bool isHeld = (_pickupController != null && _pickupController.isHolding && _pickupController.heldObject == obj);
+                    if (!first) sb.Append(",");
+                    first = false;
+                    sb.Append("{");
+                    sb.Append($"\"name\":\"{obj.objectName}\",");
+                    sb.Append($"\"type\":\"{obj.interactType}\",");
+                    sb.Append($"\"description\":\"{obj.description}\",");
+                    sb.Append($"\"is_held\":{(isHeld ? "true" : "false")},");
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"distance\":{0:F2},", dist));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"forward_dist\":{0:F2},", offset.z));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"lateral_dist\":{0:F2},", offset.x));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"bearing_deg\":{0:F1},", bearing));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"vector\":[{0:F2},{1:F2},{2:F2}]", offset.x, offset.y, offset.z));
+                    sb.Append("}");
+                }
+            }
+            else
+            {
+                // Fallback search by tag
+                var gos = GameObject.FindGameObjectsWithTag("Interactable");
+                foreach (var go in gos)
+                {
+                    if (go == null) continue;
+                    Vector3 offset = go.transform.position - refTr.position;
+                    float dist = offset.magnitude;
+                    float bearing = Vector3.SignedAngle(refTr.forward, new Vector3(offset.x, 0f, offset.z), Vector3.up);
+
+                    if (!first) sb.Append(",");
+                    first = false;
+                    sb.Append("{");
+                    sb.Append($"\"name\":\"{go.name}\",");
+                    sb.Append("\"type\":\"Object\",");
+                    sb.Append("\"description\":\"Interactable scene item\",");
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"distance\":{0:F2},", dist));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"forward_dist\":{0:F2},", offset.z));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"lateral_dist\":{0:F2},", offset.x));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"bearing_deg\":{0:F1},", bearing));
+                    sb.Append(string.Format(CultureInfo.InvariantCulture, "\"vector\":[{0:F2},{1:F2},{2:F2}]", offset.x, offset.y, offset.z));
+                    sb.Append("}");
+                }
+            }
+
+            sb.Append("]");
+            string json = sb.ToString();
+
+            try
+            {
+                _conn.Reducers.SetWindForce(json, 0f, 0f, 0f, 0f);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[SpacetimeRigController] Failed to sync interactables: {ex.Message}");
             }
         }
 
@@ -537,38 +631,59 @@ namespace Physics
 
         public void ApplyChestImpulse(Vector3 impulse)
         {
+            // Throw the physical projectile toward the chest. 
+            // The physical impact force will be delivered dynamically on contact by ObstacleProjectile,
+            // preventing the ragdoll from moving before the projectile reaches it.
+            SpawnFlyingObstacle(impulse);
+        }
+
+        public void ApplyInstantChestImpulse(Vector3 impulse)
+        {
             if (_chestRb != null && !_chestRb.isKinematic)
             {
                 _chestRb.AddForce(impulse, ForceMode.Impulse);
-                Debug.Log($"[SpacetimeRigController] Applied shove impulse {impulse} to Chest!");
+                Debug.Log($"[SpacetimeRigController] Applied direct instant shove impulse {impulse} to Chest!");
             }
             else if (_pelvisTransform != null && _pelvisTransform.TryGetComponent<Rigidbody>(out var pelvisRb) && !pelvisRb.isKinematic)
             {
                 pelvisRb.AddForce(impulse, ForceMode.Impulse);
             }
-
-            SpawnFlyingObstacle(impulse);
         }
 
         private void SpawnFlyingObstacle(Vector3 impulse)
         {
-            Vector3 targetPos = _chestRb != null ? _chestRb.position : (_pelvisTransform != null ? _pelvisTransform.position : Vector3.up * 1.5f);
-            Vector3 spawnPos = targetPos - impulse.normalized * 2.5f + Vector3.up * 0.2f;
+            Vector3 targetPos = _chestRb != null ? _chestRb.position : (_pelvisTransform != null ? _pelvisTransform.position : Vector3.up * 1.45f);
+            
+            // Spawn in front of the dummy (between camera and chest) so user sees the dodgeball pitch incoming
+            Vector3 spawnPos = new Vector3(targetPos.x, targetPos.y + 0.05f, targetPos.z - 2.8f);
 
             GameObject obstacle = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             obstacle.name = "Obstacle_Projectile";
             obstacle.transform.position = spawnPos;
-            obstacle.transform.localScale = Vector3.one * 0.35f;
+            obstacle.transform.localScale = Vector3.one * 0.38f;
 
             var rend = obstacle.GetComponent<Renderer>();
             if (rend != null)
             {
-                rend.material.color = new Color(0.95f, 0.25f, 0.2f);
+                rend.material.color = new Color(0.95f, 0.22f, 0.2f); // Vibrant dodgeball red
             }
 
             var rb = obstacle.AddComponent<Rigidbody>();
             rb.mass = 5f;
-            rb.velocity = impulse.normalized * 10f;
+            rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            rb.useGravity = false; // Direct aerodynamic flight into chest
+
+            // Direct projectile towards target chest position
+            float throwSpeed = 16f;
+            Vector3 flightDir = (targetPos - spawnPos).normalized;
+            rb.velocity = flightDir * throwSpeed;
+
+            // Physical impulse transferred on contact
+            Vector3 impactForce = new Vector3(UnityEngine.Random.Range(-25f, 25f), UnityEngine.Random.Range(15f, 35f), UnityEngine.Random.Range(100f, 150f));
+
+            var proj = obstacle.AddComponent<ObstacleProjectile>();
+            proj.impactImpulse = impactForce;
+            proj.targetRoot = transform;
 
             Destroy(obstacle, 4f);
         }
