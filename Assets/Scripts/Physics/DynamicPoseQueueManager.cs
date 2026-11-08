@@ -72,6 +72,40 @@ namespace Physics
         public Vector3 currentPelvisAnchor => _currentPelvisAnchor;
         public Vector3 targetPelvisAnchor => _targetPelvisAnchor;
 
+        [Header("Heading & Turn Control")]
+        [Tooltip("Target world yaw orientation (degrees).")]
+        public float targetHeadingYaw = 0f;
+        [Tooltip("Rate of heading rotation in degrees per second.")]
+        public float turnSpeed = 240f;
+        public float currentHeadingYaw => _currentHeadingYaw;
+        private float _currentHeadingYaw = 0f;
+        private bool _hasInitHeading = false;
+        private Quaternion _initialPelvisRotation = Quaternion.identity;
+
+        [Header("Court Half Boundaries")]
+        public bool enforceCourtBounds = true;
+        public float minCourtZ = -12.0f;
+        public float maxCourtZ = -0.65f;
+        public float minCourtX = -8.0f;
+        public float maxCourtX = 8.0f;
+
+        public void ConfigureCourtBounds(uint npcId)
+        {
+            enforceCourtBounds = true;
+            if (npcId == 1)
+            {
+                // Team Blue / South half: strictly Z in [-12, -0.65]
+                minCourtZ = -12.0f;
+                maxCourtZ = -0.65f;
+            }
+            else
+            {
+                // Team Red / North half: strictly Z in [+0.65, +12]
+                minCourtZ = 0.65f;
+                maxCourtZ = 12.0f;
+            }
+        }
+
         [Header("Live Queue Telemetry (Read-Only)")]
         public bool isExecuting = false;
         public string activeActionName = "";
@@ -99,6 +133,7 @@ namespace Physics
         private float _stallTimer = 0f;
 
         private ConfigurableJoint _pelvisJoint;
+        private Transform _pelvisTransform;
         private Vector3 _initialPelvisAnchor = Vector3.zero;
         private Vector3 _currentPelvisAnchor = Vector3.zero;
         private Vector3 _targetPelvisAnchor = Vector3.zero;
@@ -129,6 +164,23 @@ namespace Physics
             IndexBoneControllers();
         }
 
+        private void Start()
+        {
+            var rigCtrl = GetComponent<SpacetimeRigController>();
+            if (rigCtrl != null)
+            {
+                ConfigureCourtBounds(rigCtrl.npcId);
+            }
+            else if (name.Contains("Team2") || name.Contains("(1)"))
+            {
+                ConfigureCourtBounds(2);
+            }
+            else
+            {
+                ConfigureCourtBounds(1);
+            }
+        }
+
         public void IndexBoneControllers()
         {
             _boneMap.Clear();
@@ -152,6 +204,7 @@ namespace Physics
                 }
                 if (pelvisTr != null)
                 {
+                    _pelvisTransform = pelvisTr;
                     _pelvisJoint = pelvisTr.GetComponent<ConfigurableJoint>();
                     if (_pelvisJoint != null)
                     {
@@ -168,6 +221,14 @@ namespace Physics
                             _targetPelvisAnchor = _initialPelvisAnchor;
                         }
                     }
+
+                    if (!_hasInitHeading)
+                    {
+                        _initialPelvisRotation = pelvisTr.rotation;
+                        _currentHeadingYaw = pelvisTr.eulerAngles.y;
+                        targetHeadingYaw = _currentHeadingYaw;
+                        _hasInitHeading = true;
+                    }
                 }
             }
         }
@@ -180,6 +241,59 @@ namespace Physics
             return null;
         }
 
+        /// <summary>
+        /// Directs the ragdoll heading to face toward a world target position (e.g. dodgeball or opponent).
+        /// Evaluates direction relative to the live physical pelvis position rather than the unmoving root transform.
+        /// </summary>
+        public void TurnToFace(Vector3 worldTargetPosition, bool immediate = false)
+        {
+            Vector3 refPos = _pelvisTransform != null ? _pelvisTransform.position : transform.position;
+            Vector3 dir = worldTargetPosition - refPos;
+            dir.y = 0f;
+            if (dir.sqrMagnitude > 0.001f)
+            {
+                float targetYaw = Quaternion.LookRotation(dir).eulerAngles.y;
+                SetHeadingYaw(targetYaw, immediate);
+            }
+        }
+
+        /// <summary>
+        /// Sets the desired heading yaw angle in degrees.
+        /// </summary>
+        public void SetHeadingYaw(float yawDegrees, bool immediate = false)
+        {
+            targetHeadingYaw = yawDegrees;
+            if (immediate)
+            {
+                _currentHeadingYaw = yawDegrees;
+                ApplyHeadingRotation(Quaternion.Euler(0f, _currentHeadingYaw, 0f));
+            }
+        }
+
+        /// <summary>
+        /// Resets the ragdoll heading orientation to face directly forward into the court (North / 0° for Team 1, South / 180° for Team 2).
+        /// Immediately aligns root transform, physics pelvis, and configurable joint.
+        /// </summary>
+        public void ResetOrientationToForward()
+        {
+            float forwardYaw = (transform.name.Contains("Team2") || (TryGetComponent<SpacetimeRigController>(out var sc) && sc.npcId == 2)) ? 180f : 0f;
+            SetHeadingYaw(forwardYaw, immediate: true);
+        }
+
+        private void ApplyHeadingRotation(Quaternion desiredRot)
+        {
+            transform.rotation = desiredRot;
+            if (_pelvisTransform != null && _pelvisTransform.TryGetComponent<Rigidbody>(out var prb))
+            {
+                prb.MoveRotation(desiredRot);
+            }
+            if (_pelvisJoint != null)
+            {
+                Quaternion relRot = Quaternion.Inverse(_initialPelvisRotation) * desiredRot;
+                _pelvisJoint.targetRotation = Quaternion.Inverse(relRot);
+            }
+        }
+
         private void FixedUpdate()
         {
             if (_boneMap == null || _boneMap.Count == 0)
@@ -187,11 +301,39 @@ namespace Physics
                 IndexBoneControllers();
             }
 
+            // Strictly enforce half-court containment on target anchor and physical pelvis
+            if (enforceCourtBounds)
+            {
+                _targetPelvisAnchor.z = Mathf.Clamp(_targetPelvisAnchor.z, minCourtZ, maxCourtZ);
+                _targetPelvisAnchor.x = Mathf.Clamp(_targetPelvisAnchor.x, minCourtX, maxCourtX);
+
+                if (_pelvisTransform != null && _pelvisTransform.TryGetComponent<Rigidbody>(out var prb))
+                {
+                    if (prb.position.z < minCourtZ || prb.position.z > maxCourtZ)
+                    {
+                        float clampedZ = Mathf.Clamp(prb.position.z, minCourtZ + 0.05f, maxCourtZ - 0.05f);
+                        prb.position = new Vector3(prb.position.x, prb.position.y, clampedZ);
+                        Vector3 vel = prb.velocity;
+                        if (prb.position.z >= maxCourtZ && vel.z > 0f) vel.z = 0f;
+                        if (prb.position.z <= minCourtZ && vel.z < 0f) vel.z = 0f;
+                        prb.velocity = vel;
+                    }
+                }
+            }
+
             // Smoothly advance the pelvis locomotion suspension anchor
             if (_pelvisJoint != null && (_currentPelvisAnchor != _targetPelvisAnchor || _isLocomoting))
             {
                 _currentPelvisAnchor = Vector3.MoveTowards(_currentPelvisAnchor, _targetPelvisAnchor, locomotionSpeed * Time.fixedDeltaTime);
                 _pelvisJoint.connectedAnchor = _currentPelvisAnchor;
+            }
+
+            // Smoothly interpolate heading towards targetHeadingYaw and apply to root and joint
+            if (_hasInitHeading)
+            {
+                _currentHeadingYaw = Mathf.MoveTowardsAngle(_currentHeadingYaw, targetHeadingYaw, turnSpeed * Time.fixedDeltaTime);
+                Quaternion desiredRot = Quaternion.Euler(0f, _currentHeadingYaw, 0f);
+                ApplyHeadingRotation(desiredRot);
             }
 
             // Active Holding Loop: Constantly enforce final setpoint and compute error
@@ -389,7 +531,8 @@ namespace Physics
                         if (_pickupController.opponentTarget != null)
                         {
                             Vector3 targetPos = _pickupController.opponentTarget.position + Vector3.up * 0.2f;
-                            Vector3 origin = transform.position + Vector3.up * 1.2f;
+                            Vector3 refPos = _pelvisTransform != null ? _pelvisTransform.position : transform.position;
+                            Vector3 origin = refPos + Vector3.up * 0.4f;
                             throwDir = (targetPos - origin).normalized;
                             throwDir = (throwDir + Vector3.up * 0.12f).normalized;
                         }
@@ -414,6 +557,13 @@ namespace Physics
                 {
                     _targetPelvisAnchor += transform.forward * 0.25f;
                     _isLocomoting = true;
+                }
+
+                // Strictly clamp anchor within assigned court half
+                if (enforceCourtBounds)
+                {
+                    _targetPelvisAnchor.z = Mathf.Clamp(_targetPelvisAnchor.z, minCourtZ, maxCourtZ);
+                    _targetPelvisAnchor.x = Mathf.Clamp(_targetPelvisAnchor.x, minCourtX, maxCourtX);
                 }
             }
             else
@@ -460,6 +610,8 @@ namespace Physics
                     rb.angularVelocity = Vector3.zero;
                 }
             }
+
+            ResetOrientationToForward();
 
             if (_boneMap == null || _boneMap.Count == 0)
             {

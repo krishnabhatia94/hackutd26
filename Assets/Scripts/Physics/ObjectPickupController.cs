@@ -24,7 +24,7 @@ namespace Physics
 
         [Header("Pickup & Throw Tuning")]
         [Tooltip("Maximum distance from hand midpoint to object center to trigger pickup.")]
-        public float pickupReachDistance = 0.95f;
+        public float pickupReachDistance = 1.65f;
 
         [Tooltip("Forward offset from hand midpoint where the object rests.")]
         public float forwardGripOffset = 0.08f;
@@ -204,6 +204,14 @@ namespace Physics
             foreach (var candidate in InteractableObject.AllInteractables)
             {
                 if (candidate == null) continue;
+                if (candidate.isHeld) continue; // Skip objects already held by another ragdoll
+
+                // Skip high-speed projectiles currently flying through the air (> 2.8m/s)
+                if (candidate.TryGetComponent<Rigidbody>(out var crb))
+                {
+                    if (crb.velocity.sqrMagnitude > 8.0f) continue;
+                }
+
                 float d = Vector3.Distance(handMid, candidate.transform.position);
                 if (d < bestDist)
                 {
@@ -221,12 +229,13 @@ namespace Physics
                     float d = Vector3.Distance(handMid, go.transform.position);
                     if (d < bestDist)
                     {
+                        var inter = go.GetComponent<InteractableObject>();
+                        if (inter == null) inter = go.AddComponent<InteractableObject>();
+                        if (inter.isHeld) continue;
+                        if (go.TryGetComponent<Rigidbody>(out var grb) && grb.velocity.sqrMagnitude > 8.0f) continue;
+
                         bestDist = d;
-                        bestObj = go.GetComponent<InteractableObject>();
-                        if (bestObj == null)
-                        {
-                            bestObj = go.AddComponent<InteractableObject>();
-                        }
+                        bestObj = inter;
                     }
                 }
             }
@@ -269,7 +278,7 @@ namespace Physics
             heldObject.transform.SetParent(_gripAnchor, true);
 
             var proj = heldObject.GetComponent<ObstacleProjectile>();
-            if (proj != null) proj.ResetImpact();
+            if (proj != null) proj.EndAirborneSession();
 
             // Temporarily ignore collisions with humanoid ragdoll colliders while held
             _heldColliders = heldObject.GetComponentsInChildren<Collider>(true);
@@ -291,7 +300,11 @@ namespace Physics
                 }
             }
 
-            Debug.Log($"[ObjectPickupController] Successfully grasped and childed '{target.gameObject.name}' to hands grip anchor.");
+            target.isHeld = true;
+            var rigCtrl = GetComponent<SpacetimeRigController>();
+            target.heldByNpcId = rigCtrl != null ? rigCtrl.npcId : 1;
+
+            Debug.Log($"[ObjectPickupController] Successfully grasped and childed '{target.gameObject.name}' to hands grip anchor (held by NPC {target.heldByNpcId}).");
             OnObjectPickedUp?.Invoke(target);
         }
 
@@ -306,11 +319,26 @@ namespace Physics
             isHolding = false;
             heldObject = null;
 
+            // Unmark held state on the object
+            released.isHeld = false;
+            released.heldByNpcId = 0;
+
             // Unparent from humanoid hands
             released.transform.SetParent(null, true);
 
             var proj = released.GetComponent<ObstacleProjectile>();
-            if (proj != null) proj.ResetImpact();
+            if (proj != null)
+            {
+                if (throwForce != Vector3.zero)
+                {
+                    var faceCtrl = GetComponent<RagdollFaceController>();
+                    proj.LaunchAirborne(faceCtrl);
+                }
+                else
+                {
+                    proj.EndAirborneSession();
+                }
+            }
 
             // Temporarily ignore collisions with humanoid ragdoll colliders so the ball cleanly exits hand volume
             StartCoroutine(RestoreCollisionsAfterDelay(released, 0.4f));

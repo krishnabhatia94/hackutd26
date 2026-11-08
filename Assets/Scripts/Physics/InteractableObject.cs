@@ -28,6 +28,13 @@ namespace Physics
         [Tooltip("Target interaction radius in meters.")]
         public float interactionRadius = 0.5f;
 
+        [Header("Live Held State")]
+        [Tooltip("Whether this object is currently held by a humanoid.")]
+        public bool isHeld = false;
+
+        [Tooltip("ID of the NPC currently holding this object.")]
+        public uint heldByNpcId = 0;
+
         private void OnEnable()
         {
             if (!AllInteractables.Contains(this))
@@ -74,28 +81,18 @@ namespace Physics
         public Vector3 GetPosition() => transform.position;
 
         /// <summary>
-        /// Computes 3D offset and distance relative to a reference position (e.g. humanoid pelvis).
+        /// Computes 3D local offset and distance relative to a reference position (e.g. humanoid pelvis/root).
+        /// vectorFromHumanoid is in the humanoid's local coordinate space, where Z is forward, X is lateral, and Y is vertical.
         /// </summary>
         public (Vector3 vectorFromHumanoid, float distance, float bearingDeg) GetTelemetryRelativeTo(Transform humanoid)
         {
             if (humanoid == null) return (Vector3.zero, 0f, 0f);
 
-            Vector3 offset = transform.position - humanoid.position;
-            float dist = offset.magnitude;
+            Vector3 localOffset = humanoid.InverseTransformPoint(transform.position);
+            float dist = localOffset.magnitude;
+            float bearing = Mathf.Atan2(localOffset.x, localOffset.z) * Mathf.Rad2Deg;
 
-            // Compute horizontal bearing angle relative to humanoid's forward orientation
-            Vector3 forward = humanoid.forward;
-            forward.y = 0f;
-            Vector3 horizOffset = offset;
-            horizOffset.y = 0f;
-
-            float bearing = 0f;
-            if (forward.sqrMagnitude > 0.001f && horizOffset.sqrMagnitude > 0.001f)
-            {
-                bearing = Vector3.SignedAngle(forward.normalized, horizOffset.normalized, Vector3.up);
-            }
-
-            return (offset, dist, bearing);
+            return (localOffset, dist, bearing);
         }
     }
 }

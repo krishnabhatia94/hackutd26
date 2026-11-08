@@ -18,9 +18,14 @@ namespace Physics.Editor
 
         private static void CheckAndAutoBuild()
         {
-            if (!System.IO.File.Exists("Assets/Scenes/DodgeballCourt.unity"))
+            string flagFile = "Assets/rebuild_scene.flag";
+            if (System.IO.File.Exists(flagFile) || !System.IO.File.Exists("Assets/Scenes/DodgeballCourt.unity"))
             {
-                Debug.Log("[DodgeballCourtSceneAutoRunner] Scene 'Assets/Scenes/DodgeballCourt.unity' not found. Auto-generating court...");
+                if (System.IO.File.Exists(flagFile))
+                {
+                    try { System.IO.File.Delete(flagFile); } catch {}
+                }
+                Debug.Log("[DodgeballCourtSceneAutoRunner] Building bare DodgeballCourt scene asset...");
                 DodgeballCourtSceneBuilder.BuildDodgeballCourtScene();
             }
         }
@@ -67,34 +72,32 @@ namespace Physics.Editor
             // 4. Center Line Dodgeballs
             List<InteractableObject> dodgeballs = SpawnCenterDodgeballs(arenaRoot.transform, ballMat, ballPhysMat);
 
-            // 5. Dummy 1 (Team Blue, South end, z = -8)
-            GameObject dummy1 = BuildHumanoidCompetitor("HumanoidRig_Team1", new Vector3(0f, 0f, -8f), Quaternion.identity, blueRigMat, 1);
-
-            // Attach user's camera to Dummy 1's Pelvis (exact setup from SampleScene)
-            Transform pelvis1 = dummy1.transform.Find("Pelvis");
-            Camera dummy1Cam = SetupDummy1Camera(pelvis1);
-
-            // 6. Dummy 2 (Team Red, North end, z = +8, facing south towards Dummy 1)
-            GameObject dummy2 = BuildHumanoidCompetitor("HumanoidRig_Team2", new Vector3(0f, 0f, 8f), Quaternion.Euler(0f, 180f, 0f), redRigMat, 2);
-
-            // 7. Court Spectator Broadcast Camera
+            // 5. Cameras
+            // Bare scene: Main Camera positioned at arena overview angle.
+            // When local player connects, SpacetimeNetworkSpawner dynamically re-parents Main Camera to their local ragdoll pelvis.
+            Camera mainCam = SetupMainCamera();
             Camera spectatorCam = SetupSpectatorCamera();
 
-            // Ensure Dummy 1 camera starts active, spectator camera is available on toggle
-            if (dummy1Cam != null && spectatorCam != null)
-            {
-                dummy1Cam.enabled = true;
-                spectatorCam.enabled = false;
-            }
+            mainCam.enabled = true;
+            if (spectatorCam != null) spectatorCam.enabled = false;
 
-            // 8. Match Manager & UI
+            // 6. Match Manager & Multiplayer Spawner
+            // Dummies are NOT pre-placed in the scene; they spawn dynamically when players join via SpacetimeDB!
             GameObject managerGo = new GameObject("DodgeballMatchManager");
             var matchMgr = managerGo.AddComponent<DodgeballMatchManager>();
-            matchMgr.dummy1 = dummy1;
-            matchMgr.dummy2 = dummy2;
             matchMgr.dodgeballs = dodgeballs;
-            matchMgr.dummy1Camera = dummy1Cam;
             matchMgr.spectatorCamera = spectatorCam;
+
+            var spawner = managerGo.AddComponent<SpacetimeNetworkSpawner>();
+            spawner.blueRagdollTemplate = null;
+            spawner.redRagdollTemplate = null;
+            spawner.playerFollowCamera = mainCam;
+            spawner.spectatorCamera = spectatorCam;
+            spawner.blueTorsoMat = blueRigMat;
+            spawner.redTorsoMat = redRigMat;
+
+            var playerUI = managerGo.AddComponent<UI.PlayerMotionControllerUI>();
+            spawner.playerUI = playerUI;
 
             // Save Scene
             EditorSceneManager.SaveScene(scene, SCENE_PATH);
@@ -453,6 +456,22 @@ namespace Physics.Editor
             var sr = fv.AddComponent<SpriteRenderer>();
             var idleSpr = AssetDatabase.LoadAssetAtPath<Sprite>("Assets/idleface.png");
             if (idleSpr != null) sr.sprite = idleSpr;
+        }
+
+        private static Camera SetupMainCamera()
+        {
+            GameObject camGo = new GameObject("Main Camera");
+            camGo.tag = "MainCamera";
+            camGo.transform.position = new Vector3(0f, 8f, -14f);
+            camGo.transform.rotation = Quaternion.Euler(24f, 0f, 0f);
+
+            Camera cam = camGo.AddComponent<Camera>();
+            cam.fieldOfView = 60f;
+            cam.nearClipPlane = 0.3f;
+            cam.farClipPlane = 1000f;
+            camGo.AddComponent<AudioListener>();
+
+            return cam;
         }
 
         private static Camera SetupDummy1Camera(Transform pelvisTransform)

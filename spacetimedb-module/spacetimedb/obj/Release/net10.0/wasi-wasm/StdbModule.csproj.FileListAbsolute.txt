@@ -10,3 +10,4 @@ C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\obj\Release\
 C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\obj\Release\net10.0\wasi-wasm\refint\StdbModule.dll
 C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\obj\Release\net10.0\wasi-wasm\StdbModule.pdb
 C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\obj\Release\net10.0\wasi-wasm\ref\StdbModule.dll
+C:\Users\krishna\Documents\hackutd26\spacetimedb-module\spacetimedb\obj\Release\net10.0\wasi-wasm\StdbModule.sourcelink.json

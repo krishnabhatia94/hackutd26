@@ -91,6 +91,8 @@ namespace Physics
         private void FixedUpdate()
         {
             if (!applyTorque) return;
+            // The world-anchored pelvis joint is exclusively driven by DynamicPoseQueueManager for heading/turning
+            if (boneName == "Pelvis") return;
 
             // 1. Calculate orientation error for telemetry
             Vector3 currentLocalEuler = transform.localEulerAngles;

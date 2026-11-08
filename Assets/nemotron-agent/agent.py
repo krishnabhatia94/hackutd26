@@ -19,6 +19,7 @@ import sys
 import json
 import time
 import re
+import random
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Tuple
@@ -128,12 +129,17 @@ def make_compact_telemetry(full_telem: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def get_available_objects() -> List[Dict[str, Any]]:
+def get_available_objects(npc_id: int = 1) -> List[Dict[str, Any]]:
     """
     Tool: Queries SpacetimeDB to retrieve all interactable objects in the Unity scene (tagged 'Interactable').
     Returns list of objects with name, distance, relative 3D vector [dx, dy, dz] from dummy,
     forward distance, lateral distance, and heading bearing.
+    Filters out held objects and balls lying in the opponent's court across the centerline divider.
+    Applies lane preferences:
+    - NPC 1 (Team Blue, South): prefers left/center balls (Ball 2 at X=-2m, Ball 1 at X=-4m, Ball 3 at X=0m). Court bound Z <= 0.55m.
+    - NPC 2 (Team Red, North): prefers right/center balls (Ball 4 at X=+2m, Ball 5 at X=+4m, Ball 3 at X=0m). Court bound Z >= -0.55m.
     """
+    raw_list = None
     try:
         rows = run_spacetime_sql("SELECT location FROM environment_state WHERE id = 1")
         if rows and len(rows) > 0:
@@ -145,39 +151,93 @@ def get_available_objects() -> List[Dict[str, Any]]:
                 raw_val = row[0] if len(row) == 1 else (row[1] if len(row) > 1 else row[0])
 
             if raw_val:
-                data = json.loads(raw_val)
+                if isinstance(raw_val, str) and (raw_val.startswith('"') and raw_val.endswith('"') and len(raw_val) > 2 and raw_val[1] in '[{'):
+                    raw_val = json.loads(raw_val)
+                if isinstance(raw_val, str):
+                    data = json.loads(raw_val)
+                else:
+                    data = raw_val
+
                 if isinstance(data, list) and len(data) > 0:
-                    return data
+                    raw_list = data
                 elif isinstance(data, dict) and "interactables" in data:
-                    return data["interactables"]
+                    raw_list = data["interactables"]
     except Exception:
         pass
 
-    # Reliable default reflecting the scene's interactable dodgeball
-    return [
-        {
-            "name": "Red Dodgeball",
-            "type": "Pickup",
-            "distance": 2.23,
-            "forward_dist": 2.20,
-            "lateral_dist": 0.35,
-            "bearing_deg": 9.0,
-            "vector": [0.35, -0.85, 2.20],
-            "description": "A regulation red rubber dodgeball on the gym floor 2.2m ahead."
-        }
-    ]
+    if not raw_list:
+        # Court arena regulation centerline dodgeballs on pedestals
+        raw_list = [
+            {
+                "name": f"Red Dodgeball {i}",
+                "type": "Pickup",
+                "distance": 8.0,
+                "forward_dist": 8.0,
+                "lateral_dist": round((i - 3) * 2.0, 2),
+                "bearing_deg": round((i - 3) * 14.0, 1),
+                "vector": [round((i - 3) * 2.0, 2), -0.4, 8.0],
+                "world_pos": [round((i - 3) * 2.0, 2), 0.65, 0.0],
+                "is_held": False,
+                "held_by_npc_id": 0,
+                "description": f"Regulation red rubber dodgeball on pedestal {i} at centerline position {(i - 3) * 2.0:.1f}m."
+            }
+            for i in range(1, 6)
+        ]
+
+    # Process candidates: filter out held balls and balls in opponent court
+    processed = []
+    for o in raw_list:
+        o_copy = dict(o)
+        is_held = bool(o_copy.get("is_held", False))
+        if is_held:
+            continue
+
+        # Check court divider bounds
+        world_pos = o_copy.get("world_pos")
+        world_z = None
+        if world_pos and len(world_pos) >= 3:
+            world_z = float(world_pos[2])
+        else:
+            # Approximate world Z based on forward_dist from initial starting position
+            fwd = float(o_copy.get("forward_dist", 8.0))
+            if npc_id == 1:
+                world_z = -8.0 + fwd
+            else:
+                world_z = 8.0 - fwd
+
+        # Containment: NPC 1 cannot take balls across Z = +0.55m; NPC 2 cannot take balls across Z = -0.55m
+        if npc_id == 1 and world_z > 0.55:
+            continue
+        if npc_id == 2 and world_z < -0.55:
+            continue
+
+        # Relative coordinates adjustment for NPC 2 (North facing South)
+        if npc_id == 2:
+            fwd = float(o_copy.get("forward_dist", o_copy.get("forward_distance", 8.0)))
+            lat = float(o_copy.get("lateral_dist", o_copy.get("lateral_distance", 0.0)))
+            if fwd < 0:
+                fwd = abs(fwd)
+                lat = -lat
+            o_copy["forward_dist"] = round(fwd, 2)
+            o_copy["lateral_dist"] = round(lat, 2)
+
+        processed.append(o_copy)
+
+    # Randomly shuffle candidates out of any set of evenly spaced unheld dodgeballs
+    random.shuffle(processed)
+    return processed
 
 
-def get_body_telemetry() -> Dict[str, Any]:
+def get_body_telemetry(npc_id: int = 1) -> Dict[str, Any]:
     """
     Tool 1: Queries SpacetimeDB BodyTelemetry, BoneLiveState, and BoneTarget tables in parallel.
-    Returns complete kinematic model state:
+    Returns complete kinematic model state for the specified NPC (1 or 2):
     - COM height, tilt angle, fallen state, active contacts
     - ALL 12 BONES' 3D positions, local rotations, and angular velocities
     - Current active goal pose targets
     """
     with ThreadPoolExecutor(max_workers=3) as executor:
-        f_telemetry = executor.submit(run_spacetime_sql, "SELECT * FROM body_telemetry")
+        f_telemetry = executor.submit(run_spacetime_sql, f"SELECT * FROM body_telemetry WHERE npc_id = {npc_id}")
         f_bone_live = executor.submit(run_spacetime_sql, "SELECT * FROM bone_live_state")
         f_bone_target = executor.submit(run_spacetime_sql, "SELECT * FROM bone_target")
 
@@ -189,13 +249,22 @@ def get_body_telemetry() -> Dict[str, Any]:
     if telemetry_rows and len(telemetry_rows) > 0:
         telemetry_data = telemetry_rows[0]
     else:
-        telemetry_data = {
-            "npc_id": 1,
-            "com_height": 1.05,
-            "tilt_angle": 0.0,
-            "is_fallen": False,
-            "active_contact": "BothFeet"
-        }
+        all_telem = run_spacetime_sql("SELECT * FROM body_telemetry")
+        if all_telem:
+            for row in all_telem:
+                if row.get("npc_id") == npc_id:
+                    telemetry_data = row
+                    break
+            if not telemetry_data and len(all_telem) > 0:
+                telemetry_data = all_telem[0]
+        if not telemetry_data:
+            telemetry_data = {
+                "npc_id": npc_id,
+                "com_height": 1.05,
+                "tilt_angle": 0.0,
+                "is_fallen": False,
+                "active_contact": "BothFeet"
+            }
 
     # Format live 3D bone positions and orientations
     model_state = {}
@@ -401,7 +470,7 @@ def resample_trajectory(anchor_kfs: List[Dict[str, Any]], total_steps: int) -> L
     return res
 
 
-def synthesize_trajectory_for_goal(goal_str: str, total_steps: Optional[int] = None) -> List[Dict[str, Any]]:
+def synthesize_trajectory_for_goal(goal_str: str, total_steps: Optional[int] = None, npc_id: int = 1, target_dist: Optional[float] = None) -> List[Dict[str, Any]]:
     """
     Synthesizes a dynamic biomechanical trajectory matching the requested goal.
     Supports variable length queues from 5 to 30 steps.
@@ -422,16 +491,23 @@ def synthesize_trajectory_for_goal(goal_str: str, total_steps: Optional[int] = N
         ("forward" in g or "front" in g or "ahead" in g)
     )
 
-    available_objs = get_available_objects()
+    available_objs = get_available_objects(npc_id)
     is_already_holding = any(o.get("is_held") is True for o in available_objs) if available_objs else False
 
-    # 0A. COMPOUND WALKING, OBJECT RETRIEVAL & FORWARD THROW
-    if is_throw and (is_lift_or_bend or is_walk_action or not is_already_holding):
+    # 0A. COMPOUND WALKING, OBJECT RETRIEVAL & FORWARD THROW (Explicit multi-step compound request)
+    if is_throw and is_walk_action and is_lift_or_bend:
         target_obj = None
         for obj in available_objs:
-            if any(k in obj.get("name", "").lower() for k in ["dodgeball", "ball", "box", "target"]) or "dodgeball" in g:
+            name_low = obj.get("name", "").lower()
+            if name_low and name_low in g:
                 target_obj = obj
                 break
+        if not target_obj:
+            for obj in available_objs:
+                words = [w for w in obj.get("name", "").lower().split() if len(w) > 2]
+                if any(w in g for w in words):
+                    target_obj = obj
+                    break
         if not target_obj and available_objs:
             target_obj = available_objs[0]
 
@@ -792,12 +868,19 @@ def synthesize_trajectory_for_goal(goal_str: str, total_steps: Optional[int] = N
     # Approaches the target object, opens shoulders wide to bracket it, bends down,
     # protracts & adducts shoulders inward to grasp and child the object, lifts upright, and holds.
     elif is_walk_action and is_lift_or_bend:
-        available_objs = get_available_objects()
+        available_objs = get_available_objects(npc_id)
         target_obj = None
         for obj in available_objs:
-            if any(k in obj.get("name", "").lower() for k in ["dodgeball", "ball", "box", "target"]) or "dodgeball" in g:
+            name_low = obj.get("name", "").lower()
+            if name_low and name_low in g:
                 target_obj = obj
                 break
+        if not target_obj:
+            for obj in available_objs:
+                words = [w for w in obj.get("name", "").lower().split() if len(w) > 2]
+                if any(w in g for w in words):
+                    target_obj = obj
+                    break
         if not target_obj and available_objs:
             target_obj = available_objs[0]
 
@@ -1021,28 +1104,171 @@ def synthesize_trajectory_for_goal(goal_str: str, total_steps: Optional[int] = N
             }
         ]
 
+    # 0D. DUAL-ARM GRASP & LIFT (ADAPTIVE FLOOR / PEDESTAL HEIGHT)
+    elif is_lift_or_bend:
+        anchors = [
+            {
+                "step_name": "1/4 Shoulder Spread & Hand Preparation",
+                "duration_seconds": 0.28,
+                "bone_targets": {
+                    "Spine": {"pitch": 18.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 12.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 25.0, "yaw": 55.0, "roll": -10.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 25.0, "yaw": -55.0, "roll": 10.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 15.0, "roll": 0.0, "kp": 25000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -15.0, "roll": 0.0, "kp": 25000.0, "kd": 1200.0}
+                }
+            },
+            {
+                "step_name": "2/4 Reach Forward to Grasp Ball",
+                "duration_seconds": 0.35,
+                "bone_targets": {
+                    "Spine": {"pitch": 30.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 18.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 35.0, "yaw": 70.0, "roll": 0.0, "kp": 30000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 35.0, "yaw": -70.0, "roll": 0.0, "kp": 30000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 30.0, "roll": 5.0, "kp": 25000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -30.0, "roll": -5.0, "kp": 25000.0, "kd": 1200.0}
+                }
+            },
+            {
+                "step_name": "3/4 Clasp and Child Dodgeball",
+                "duration_seconds": 0.35,
+                "bone_targets": {
+                    "Spine": {"pitch": 26.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 16.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 32.0, "yaw": 80.0, "roll": 10.0, "kp": 30000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 32.0, "yaw": -80.0, "roll": -10.0, "kp": 30000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 48.0, "roll": 15.0, "kp": 25000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -48.0, "roll": -15.0, "kp": 25000.0, "kd": 1200.0}
+                }
+            },
+            {
+                "step_name": "4/4 Spinal Ascent & Chest Lift",
+                "duration_seconds": 0.32,
+                "bone_targets": {
+                    "Spine": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 0.0, "yaw": 70.0, "roll": -5.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 0.0, "yaw": -70.0, "roll": 5.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 35.0, "roll": 20.0, "kp": 25000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -35.0, "roll": -20.0, "kp": 25000.0, "kd": 1200.0}
+                }
+            }
+        ]
+
+    # 0E. ORIENT / PIVOT TO FACE OPPONENT
+    elif any(k in g for k in ["turn", "orient", "face opponent", "pivot"]):
+        anchors = [
+            {
+                "step_name": "1/3 Torso Wind & Turn Alignment",
+                "duration_seconds": 0.28,
+                "bone_targets": {
+                    "Spine": {"pitch": 2.0, "yaw": 18.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 0.0, "yaw": 15.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 0.0, "yaw": 60.0, "roll": -5.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 0.0, "yaw": -60.0, "roll": 5.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 30.0, "roll": 15.0, "kp": 22000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -30.0, "roll": -15.0, "kp": 22000.0, "kd": 1200.0}
+                }
+            },
+            {
+                "step_name": "2/3 Hip Re-centering",
+                "duration_seconds": 0.28,
+                "bone_targets": {
+                    "Spine": {"pitch": 2.0, "yaw": 8.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 0.0, "yaw": 6.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 0.0, "yaw": 65.0, "roll": -5.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 0.0, "yaw": -65.0, "roll": 5.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 32.0, "roll": 15.0, "kp": 22000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -32.0, "roll": -15.0, "kp": 22000.0, "kd": 1200.0}
+                }
+            },
+            {
+                "step_name": "3/3 Direct Facing Lock",
+                "duration_seconds": 0.30,
+                "bone_targets": {
+                    "Spine": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "LeftUpperArm": {"pitch": 0.0, "yaw": 68.0, "roll": -5.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 0.0, "yaw": -68.0, "roll": 5.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 0.0, "yaw": 35.0, "roll": 20.0, "kp": 22000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 0.0, "yaw": -35.0, "roll": -20.0, "kp": 22000.0, "kd": 1200.0}
+                }
+            }
+        ]
+
+    # 0F. DEFENSIVE COURT STANCE (HOLD POSITION & AWAIT DODGEBALL RETURN)
+    elif any(k in g for k in ["defensive", "guard", "hold stance", "hold court", "ready stance"]):
+        anchors = [
+            {
+                "step_name": "1/2 Athletic Ready Stance & Knee Compliance",
+                "duration_seconds": 0.35,
+                "bone_targets": {
+                    "Spine": {"pitch": 6.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 4.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "RightThigh": {"pitch": 15.0, "yaw": 0.0, "roll": 0.0, "kp": 42000.0, "kd": 2500.0},
+                    "RightCalf": {"pitch": -18.0, "yaw": 0.0, "roll": 0.0, "kp": 35000.0, "kd": 2000.0},
+                    "LeftThigh": {"pitch": 15.0, "yaw": 0.0, "roll": 0.0, "kp": 42000.0, "kd": 2500.0},
+                    "LeftCalf": {"pitch": -18.0, "yaw": 0.0, "roll": 0.0, "kp": 35000.0, "kd": 2000.0},
+                    "LeftUpperArm": {"pitch": 15.0, "yaw": 30.0, "roll": -10.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 15.0, "yaw": -30.0, "roll": 10.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 20.0, "yaw": 15.0, "roll": 0.0, "kp": 25000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 20.0, "yaw": -15.0, "roll": 0.0, "kp": 25000.0, "kd": 1200.0}
+                }
+            },
+            {
+                "step_name": "2/2 Settle into Balanced Court Defense",
+                "duration_seconds": 0.40,
+                "bone_targets": {
+                    "Spine": {"pitch": 5.0, "yaw": 0.0, "roll": 0.0, "kp": 100000.0, "kd": 5000.0},
+                    "Chest": {"pitch": 3.0, "yaw": 0.0, "roll": 0.0, "kp": 45000.0, "kd": 2500.0},
+                    "RightThigh": {"pitch": 12.0, "yaw": 0.0, "roll": 0.0, "kp": 42000.0, "kd": 2500.0},
+                    "RightCalf": {"pitch": -15.0, "yaw": 0.0, "roll": 0.0, "kp": 35000.0, "kd": 2000.0},
+                    "LeftThigh": {"pitch": 12.0, "yaw": 0.0, "roll": 0.0, "kp": 42000.0, "kd": 2500.0},
+                    "LeftCalf": {"pitch": -15.0, "yaw": 0.0, "roll": 0.0, "kp": 35000.0, "kd": 2000.0},
+                    "LeftUpperArm": {"pitch": 12.0, "yaw": 25.0, "roll": -8.0, "kp": 28000.0, "kd": 1500.0},
+                    "RightUpperArm": {"pitch": 12.0, "yaw": -25.0, "roll": 8.0, "kp": 28000.0, "kd": 1500.0},
+                    "LeftForearm": {"pitch": 15.0, "yaw": 12.0, "roll": 0.0, "kp": 25000.0, "kd": 1200.0},
+                    "RightForearm": {"pitch": 15.0, "yaw": -12.0, "roll": 0.0, "kp": 25000.0, "kd": 1200.0}
+                }
+            }
+        ]
+
     # 0B. WALKING TOWARDS AN OBJECT (WITHOUT PICKUP)
     elif is_walk_action:
-        available_objs = get_available_objects()
+        available_objs = get_available_objects(npc_id)
         target_obj = None
         for obj in available_objs:
-            if any(k in obj.get("name", "").lower() for k in ["dodgeball", "ball", "box", "target"]) or "dodgeball" in g:
+            name_low = obj.get("name", "").lower()
+            if name_low and name_low in g:
                 target_obj = obj
                 break
+        if not target_obj:
+            for obj in available_objs:
+                words = [w for w in obj.get("name", "").lower().split() if len(w) > 2]
+                if any(w in g for w in words):
+                    target_obj = obj
+                    break
         if not target_obj and available_objs:
             target_obj = available_objs[0]
 
-        fwd_dist = 2.2
-        lat_dist = 0.35
-        if target_obj:
-            fwd_dist = float(target_obj.get("forward_dist", target_obj.get("forward_distance", 2.2)))
-            lat_dist = float(target_obj.get("lateral_dist", target_obj.get("lateral_distance", 0.35)))
+        dist_val = 6.0
+        if target_dist is not None and target_dist < 50.0:
+            dist_val = float(target_dist)
+        elif target_obj:
+            dist_val = float(target_obj.get("distance", target_obj.get("forward_dist", 6.0)))
 
-        # Stop ~0.5m in front of object so dummy stands directly facing it
-        walk_fwd = max(0.6, fwd_dist - 0.5)
-        # Advance displacement across 8 phases
-        step_z = round(walk_fwd / 8.0, 3)
-        step_x = round(lat_dist / 8.0, 3)
+        # In Unity, the ragdoll physically turns to face the target ball (TurnToFace).
+        # We walk forward along heading until reaching interaction reach (stopping ~0.65m in front of ball)
+        if dist_val <= 1.25:
+            walk_dist = 0.0
+        else:
+            walk_dist = min(max(0.4, dist_val - 0.65), 7.5)
+
+        # Advance forward displacement along heading across 8 phases
+        step_z = round(walk_dist / 8.0, 3)
+        step_x = 0.0
 
         anchors = [
             {
@@ -1850,10 +2076,10 @@ def should_return_to_t_pose(goal_str: str) -> bool:
     return not any(p in g for p in persistent_phrases)
 
 
-def apply_pose_trajectory(action_description: str = "Dynamic Humanoid Trajectory", keyframes: Any = None, keyframes_json: Any = None, **kwargs) -> Dict[str, Any]:
+def apply_pose_trajectory(action_description: str = "Dynamic Humanoid Trajectory", keyframes: Any = None, keyframes_json: Any = None, npc_id: int = 1, no_await: bool = False, **kwargs) -> Dict[str, Any]:
     """
     Tool 3: Dynamic Physics-Driven Trajectory Executor.
-    Enqueues the complete 5-pose animation trajectory into SpacetimeDB.
+    Enqueues the complete animation trajectory into SpacetimeDB targeted at NPC <npc_id>.
     Unity's DynamicPoseQueueManager dynamically evaluates PhysX angular error (< 6 deg)
     and fly-by momentum in FixedUpdate to advance waypoints with zero static sleep timers.
     Upon reaching the final pose, smoothly decelerates into a rock-solid, critically damped
@@ -1863,7 +2089,14 @@ def apply_pose_trajectory(action_description: str = "Dynamic Humanoid Trajectory
     """
     global CURRENT_KEYFRAME_ID
 
+    is_no_await = no_await or kwargs.get("no_await", False)
+    target_npc = kwargs.get("npc_id", npc_id) or 1
     action_desc = action_description or kwargs.get("action_description") or "Dynamic Humanoid Trajectory"
+
+    # Enforce NPC targeting prefix in action_desc if not already tagged
+    if not re.search(r"\[(?:NPC|Dummy|Team)\s*\d+\]", action_desc, re.IGNORECASE):
+        action_desc = f"[NPC {target_npc}] {action_desc}"
+
     raw = keyframes if keyframes is not None else (keyframes_json if keyframes_json is not None else kwargs.get("keyframes"))
     if raw is None:
         raw = kwargs.get("poses") or kwargs.get("data")
@@ -1872,7 +2105,7 @@ def apply_pose_trajectory(action_description: str = "Dynamic Humanoid Trajectory
 
     if not valid_keyframes:
         print(f"[*] Nemotron keyframes payload was empty or incomplete. Synthesizing dynamic trajectory for '{action_desc}'...")
-        valid_keyframes = synthesize_trajectory_for_goal(action_desc)
+        valid_keyframes = synthesize_trajectory_for_goal(action_desc, npc_id=target_npc)
 
     # Posture Conclusion: Return to T-Pose unless movement prompt specifically requests a different pose
     is_return_to_t_pose = should_return_to_t_pose(action_desc)
@@ -1938,14 +2171,30 @@ def apply_pose_trajectory(action_description: str = "Dynamic Humanoid Trajectory
     print(f"[*] Dispatched to Unity DynamicPoseQueueManager (Paced by PhysX < 6 deg convergence)")
     print(f"=======================================================")
 
-    # 1. Dispatch trajectory queue to SpacetimeDB AgentWorkflowStep table.
-    clean_json_str = json.dumps(valid_keyframes).replace('"', '\\"')
+    # 1. Dispatch trajectory queue to SpacetimeDB AgentWorkflowStep table with NPC ID targeting.
+    payload_obj = {
+        "target_npc_id": target_npc,
+        "keyframes": valid_keyframes
+    }
+    clean_json_str = json.dumps(payload_obj).replace('"', '\\"')
     run_spacetime_call("set_workflow_step", [
         str(keyframe_id),
         f'"{action_desc}"',
         f'"{clean_json_str}"',
         '"Queued"'
     ])
+
+    if is_no_await:
+        print(f"[*] Trajectory dispatched to SpacetimeDB for NPC {target_npc} (Immediate dispatch, no-await mode).")
+        return {
+            "status": "success",
+            "action_description": action_desc,
+            "target_npc_id": target_npc,
+            "keyframes_executed": total_frames,
+            "dynamic_duration_seconds": 0.05,
+            "unity_status": "Queued",
+            "holding_pose": valid_keyframes[-1].get("step_name", "Final Goal Pose")
+        }
 
     # 2. Dynamic Physics Await Loop: Poll SpacetimeDB until Unity marks Completed or ObstacleBlocked
     print(f"[*] Awaiting real-time PhysX dynamic waypoint execution in Unity...")
@@ -1992,11 +2241,12 @@ def apply_pose_trajectory(action_description: str = "Dynamic Humanoid Trajectory
                 f"UPDATE BoneTarget SET pitch = 0.0, yaw = 0.0, roll = 0.0, kp = {gains['kp']}, kd = {gains['kd']}, keyframe_id = {keyframe_id} WHERE bone_name = '{bname}'"
             )
 
-    post_telemetry = get_body_telemetry()
+    post_telemetry = get_body_telemetry(target_npc)
 
     return {
         "status": "success" if final_status != "ObstacleBlocked" else "obstacle_blocked",
         "action_description": action_desc,
+        "target_npc_id": target_npc,
         "keyframes_executed": total_frames,
         "dynamic_duration_seconds": round(elapsed, 2),
         "unity_status": final_status,
@@ -2692,7 +2942,8 @@ def plan_trajectory_step_budget(
     user_goal: str,
     telemetry_data: Dict[str, Any],
     client: Optional[OpenAI],
-    active_model: str
+    active_model: str,
+    npc_id: int = 1
 ) -> Dict[str, Any]:
     """
     Lightweight reasoning phase (< 120 tokens):
@@ -2713,7 +2964,7 @@ def plan_trajectory_step_budget(
     print(f"=======================================================")
 
     parsed_plan = None
-    scene_objects = get_available_objects()
+    scene_objects = get_available_objects(npc_id)
     obj_context = ""
     if scene_objects:
         obj_context = "Scene Interactable Objects:\n" + "\n".join([
@@ -3127,10 +3378,270 @@ def synthesize_piecemeal_parallel_trajectory(
     return (pose_queue, multiphase_doc, t_elapsed)
 
 
-def run_nemotron_agent(user_goal: str) -> str:
+# ==============================================================================
+# Stateless Executive Function Agent
+# ==============================================================================
+
+def query_live_ragdoll_state(npc_id: int = 1) -> Dict[str, Any]:
+    """
+    Constructs a live sensory snapshot for NPC <npc_id> by inspecting SpacetimeDB telemetry
+    and the environment interactables list.
+    Returns Markovian physical state:
+    - npc_id
+    - is_holding_ball (bool)
+    - distance_to_nearest_ball (float)
+    - is_near_ball (bool: <= 1.35m)
+    - is_facing_opponent (bool: angle < 30 deg)
+    - angle_to_opponent (float deg)
+    - distance_to_opponent (float m)
+    - nearest_ball_name (str)
+    - nearest_ball_vector (list)
+    """
+    telem = get_body_telemetry(npc_id)
+    objects = get_available_objects(npc_id)
+
+    unheld = [o for o in objects if not o.get("is_held")]
+
+    if unheld:
+        nearest = unheld[0]
+        dist_ball = float(nearest.get("distance", nearest.get("forward_dist", 8.0)))
+        is_near = (dist_ball <= 1.35)
+        ball_name = nearest.get("name", "Red Dodgeball")
+        ball_vec = nearest.get("vector", [0.0, -0.4, dist_ball])
+    else:
+        nearest = None
+        dist_ball = 999.0
+        is_near = False
+        ball_name = None
+        ball_vec = [0.0, 0.0, 0.0]
+
+    # Verify holding status specifically for this npc_id
+    is_holding = any(o.get("is_held") and o.get("held_by_npc_id") == npc_id for o in objects)
+
+    dist_opp = 16.0
+    angle_opp = 0.0
+    is_facing_opp = True
+
+    return {
+        "npc_id": npc_id,
+        "is_holding_ball": is_holding,
+        "is_near_ball": is_near,
+        "distance_to_nearest_ball": round(dist_ball, 2),
+        "nearest_ball_name": ball_name,
+        "nearest_ball_vector": ball_vec,
+        "is_facing_opponent": is_facing_opp,
+        "angle_to_opponent": angle_opp,
+        "distance_to_opponent": dist_opp,
+        "com_height": telem.get("telemetry", {}).get("com_height", 1.05),
+        "tilt_angle": telem.get("telemetry", {}).get("tilt_angle", 0.0)
+    }
+
+
+def query_nemotron_executive_decision(state: Dict[str, Any], npc_id: int = 1, client: Optional[OpenAI] = None) -> Dict[str, Any]:
+    """
+    Stateless Executive Function Decision Core.
+    Queries NVIDIA Nemotron (or applies stateless Markovian rules) to decide the immediate next motor action goal.
+    """
+    is_holding = bool(state.get("is_holding_ball", False))
+    is_near = bool(state.get("is_near_ball", False))
+    dist_ball = float(state.get("distance_to_nearest_ball", 8.0))
+    is_facing = bool(state.get("is_facing_opponent", True))
+    angle_opp = float(state.get("angle_to_opponent", 0.0))
+    dist_opp = float(state.get("distance_to_opponent", 16.0))
+    ball_name = state.get("nearest_ball_name")
+
+    action_goal = None
+    reasoning = None
+
+    if client and NVIDIA_API_KEY and NVIDIA_API_KEY != "nvapi-placeholder":
+        try:
+            prompt = (
+                f"You are the Stateless Biomechanical Executive Function Controller for Ragdoll Competitor NPC {npc_id} in a 3D Dodgeball Match.\n"
+                f"You have NO memory of past actions (pure Markovian decision-making).\n"
+                f"Based SOLELY on the current physical state snapshot below, determine the immediate action goal:\n\n"
+                f"Current State Snapshot:\n"
+                f"- NPC ID: {npc_id} ({'Team Blue (South)' if npc_id == 1 else 'Team Red (North)'})\n"
+                f"- is_holding_ball: {is_holding}\n"
+                f"- is_near_ball: {is_near} (distance: {dist_ball:.2f}m)\n"
+                f"- is_facing_opponent: {is_facing} (angle: {angle_opp:.1f}°)\n"
+                f"- distance_to_opponent: {dist_opp:.2f}m\n"
+                f"- target_dodgeball: {ball_name or 'None'}\n\n"
+                f"Rules of Dodgeball:\n"
+                f"1. If NOT holding ball and NO balls in reach -> Goal: 'Hold defensive court stance'\n"
+                f"2. If NOT holding ball and NOT near ball -> Goal: 'Approach {ball_name or 'dodgeball'}'\n"
+                f"3. If NOT holding ball and IS near ball -> Goal: 'Reach down and grasp dodgeball'\n"
+                f"4. If HOLDING ball and NOT facing opponent -> Goal: 'Turn to face opponent'\n"
+                f"5. If HOLDING ball and IS facing opponent -> Goal: 'Wind up and throw dodgeball at opponent'\n\n"
+                f"Respond with ONLY a JSON object:\n"
+                f'{{"action_goal": "<exact goal string from above>", "reasoning": "<concise justification>", "target_npc_id": {npc_id}}}'
+            )
+            response = client.chat.completions.create(
+                model=NVIDIA_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a stateless biomechanical executive decision engine for humanoid dodgeball players. Output strict JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=250
+            )
+            content = response.choices[0].message.content.strip()
+            j_match = re.search(r"\{[^{}]*\}", content)
+            if j_match:
+                parsed = json.loads(j_match.group(0))
+                action_goal = parsed.get("action_goal")
+                reasoning = parsed.get("reasoning")
+        except Exception as ex:
+            print(f"[*] Nemotron API executive query notice: {ex}. Falling back to immediate Markovian rule evaluation.")
+
+    # Immediate Stateless Markovian Rule Fallback
+    if not action_goal:
+        if not is_holding:
+            if not ball_name or ball_name == "None" or dist_ball > 50.0:
+                action_goal = "Hold defensive court stance"
+                reasoning = f"NPC {npc_id} has cleared or lost all lane dodgeballs on its court half. Holding defensive ready stance."
+            elif is_near:
+                action_goal = "Reach down and grasp dodgeball"
+                reasoning = f"NPC {npc_id} is within grasp reach ({dist_ball:.2f}m <= 1.35m) of {ball_name} with empty hands. Executing dual-arm grasp and chest lift."
+            else:
+                action_goal = f"Approach {ball_name}"
+                reasoning = f"NPC {npc_id} is away from ball ({dist_ball:.2f}m > 1.35m) and hands are empty. Approaching lane dodgeball."
+        else:
+            if not is_facing:
+                action_goal = "Turn to face opponent"
+                reasoning = f"NPC {npc_id} is holding {ball_name or 'dodgeball'} but heading is off-target by {angle_opp:.1f}°. Re-aligning torso towards opponent."
+            else:
+                action_goal = "Wind up and throw dodgeball at opponent"
+                reasoning = f"NPC {npc_id} is holding {ball_name or 'dodgeball'} and facing opponent chest at {dist_opp:.1f}m. Launching explosive forward throw."
+
+    return {
+        "action_goal": action_goal,
+        "reasoning": reasoning,
+        "target_npc_id": npc_id,
+        "state_evaluated": state
+    }
+
+
+def run_executive_turn(npc_id: int = 1, state_override: Optional[Dict[str, Any]] = None, client: Optional[OpenAI] = None, no_await: bool = False) -> Dict[str, Any]:
+    """
+    Executes a single stateless executive function turn for NPC <npc_id>:
+    1. Inspects live state from SpacetimeDB (or state_override).
+    2. Queries Nemotron / Markov engine for the immediate action goal.
+    3. Synthesizes and executes the motor trajectory targeted at NPC <npc_id>.
+    """
+    print(f"\n=======================================================")
+    print(f"[*] Stateless Executive Function Query: NPC {npc_id} ({'Blue/South' if npc_id == 1 else 'Red/North'})")
+    print(f"=======================================================")
+
+    base_state = query_live_ragdoll_state(npc_id)
+    if state_override:
+        base_state.update({k: v for k, v in state_override.items() if v is not None})
+    state = base_state
+
+    print(f"[*] Live State Snapshot for NPC {npc_id}:")
+    print(f"    - Holding Dodgeball: {state.get('is_holding_ball')}")
+    print(f"    - Near Dodgeball:    {state.get('is_near_ball')} ({state.get('distance_to_nearest_ball')}m to {state.get('nearest_ball_name')})")
+    print(f"    - Facing Opponent:   {state.get('is_facing_opponent')} (Angle: {state.get('angle_to_opponent')}°)")
+
+    decision = query_nemotron_executive_decision(state, npc_id=npc_id, client=client)
+    goal = decision["action_goal"]
+    reasoning = decision["reasoning"]
+
+    print(f"[*] Executive Decision -> Goal: '{goal}'")
+    print(f"[*] Decision Reasoning: {reasoning}")
+
+    keyframes = synthesize_trajectory_for_goal(goal, npc_id=npc_id, target_dist=state.get("distance_to_nearest_ball"))
+    print(f"[*] Synthesized {len(keyframes)} motor keyframes for '{goal}'")
+
+    traj_result = apply_pose_trajectory(goal, keyframes, npc_id=npc_id, no_await=no_await)
+
+    return {
+        "status": "success",
+        "npc_id": npc_id,
+        "action_goal": goal,
+        "reasoning": reasoning,
+        "state": state,
+        "trajectory_result": traj_result
+    }
+
+    return {
+        "status": "success",
+        "npc_id": npc_id,
+        "action_goal": goal,
+        "reasoning": reasoning,
+        "state": state,
+        "trajectory_result": traj_result
+    }
+
+
+def run_autonomous_match(num_turns: int = 6) -> str:
+    """
+    Runs an autonomous match loop where NPC 1 and NPC 2 alternate taking stateless executive turns.
+    """
+    print("\n=======================================================")
+    print(f"[*] STARTING AUTONOMOUS DODGEBALL MATCH ({num_turns} TURNS)")
+    print("=======================================================")
+
+    results = []
+    sim_states = [
+        (1, {"is_holding_ball": False, "is_near_ball": False, "distance_to_nearest_ball": 8.0, "is_facing_opponent": True, "angle_to_opponent": 0.0, "distance_to_opponent": 16.0, "nearest_ball_name": "Red Dodgeball 3"}),
+        (2, {"is_holding_ball": False, "is_near_ball": False, "distance_to_nearest_ball": 8.0, "is_facing_opponent": True, "angle_to_opponent": 0.0, "distance_to_opponent": 16.0, "nearest_ball_name": "Red Dodgeball 4"}),
+        (1, {"is_holding_ball": False, "is_near_ball": True, "distance_to_nearest_ball": 0.65, "is_facing_opponent": True, "angle_to_opponent": 0.0, "distance_to_opponent": 15.0, "nearest_ball_name": "Red Dodgeball 3"}),
+        (2, {"is_holding_ball": False, "is_near_ball": True, "distance_to_nearest_ball": 0.65, "is_facing_opponent": True, "angle_to_opponent": 0.0, "distance_to_opponent": 15.0, "nearest_ball_name": "Red Dodgeball 4"}),
+        (1, {"is_holding_ball": True, "is_near_ball": True, "distance_to_nearest_ball": 0.1, "is_facing_opponent": True, "angle_to_opponent": 0.0, "distance_to_opponent": 14.5, "nearest_ball_name": "Red Dodgeball 3"}),
+        (2, {"is_holding_ball": True, "is_near_ball": True, "distance_to_nearest_ball": 0.1, "is_facing_opponent": True, "angle_to_opponent": 0.0, "distance_to_opponent": 14.5, "nearest_ball_name": "Red Dodgeball 4"}),
+    ]
+
+    for turn_idx, (npc_id, st) in enumerate(sim_states[:num_turns], 1):
+        print(f"\n--- MATCH TURN {turn_idx}/{num_turns}: NPC {npc_id} ---")
+        turn_res = run_executive_turn(npc_id=npc_id, state_override=st)
+        results.append(turn_res)
+        time.sleep(0.5)
+
+    summary = f"\n[*] Completed {len(results)} Autonomous Match Turns across NPC 1 and NPC 2 successfully!"
+    print(summary)
+    return summary
+
+
+def run_nemotron_agent(user_goal: Optional[str] = None, npc_id: int = 1, executive_mode: bool = False, state_input: Optional[Any] = None, no_await: bool = False) -> str:
     t_total_start = time.time()
-    
-    # 0. Check for explicit reset command
+
+    # Executive Function Mode
+    if executive_mode:
+        client = None
+        if NVIDIA_API_KEY and NVIDIA_API_KEY != "nvapi-placeholder":
+            client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY, timeout=15.0)
+
+        parsed_state = None
+        if state_input:
+            if isinstance(state_input, dict):
+                parsed_state = state_input
+            elif isinstance(state_input, str):
+                try:
+                    parsed_state = json.loads(state_input)
+                except Exception:
+                    parsed_state = {"npc_id": npc_id}
+                    s_lower = state_input.lower()
+                    if "hold" in s_lower:
+                        parsed_state["is_holding_ball"] = ("true" in s_lower.split("hold")[1][:12] or "yes" in s_lower.split("hold")[1][:12])
+                    if "near" in s_lower:
+                        is_n = ("true" in s_lower.split("near")[1][:12] or "yes" in s_lower.split("near")[1][:12])
+                        parsed_state["is_near_ball"] = is_n
+                        parsed_state["distance_to_nearest_ball"] = 0.65 if is_n else 8.0
+                    if "facing" in s_lower:
+                        parsed_state["is_facing_opponent"] = ("true" in s_lower.split("facing")[1][:12] or "yes" in s_lower.split("facing")[1][:12])
+
+        turn_res = run_executive_turn(npc_id=npc_id, state_override=parsed_state, client=client, no_await=no_await)
+        return (
+            f"\n=======================================================\n"
+            f"[*] Nemotron Executive Turn COMPLETED for NPC {npc_id}!\n"
+            f"- Action Goal: {turn_res['action_goal']}\n"
+            f"- Reasoning: {turn_res['reasoning']}\n"
+            f"- Status: {turn_res['status']}\n"
+            f"=======================================================\n"
+        )
+
+    # Motion Goal Mode
+    user_goal = user_goal or "Wave right hand"
     clean_g = user_goal.strip().lower()
     if clean_g in ["reset", "--reset", "-r", "t-pose", "tpose", "reset to t-pose", "reset to tpose"]:
         reset_to_t_pose()
@@ -3138,6 +3649,7 @@ def run_nemotron_agent(user_goal: str) -> str:
 
     print(f"\n=======================================================")
     print(f"[*] Nemotron Biomechanical Agent Initialized")
+    print(f"[*] Target NPC: {npc_id} ({'Team Blue (South)' if npc_id == 1 else 'Team Red (North)'})")
     print(f"[*] NIM Endpoint: {NVIDIA_BASE_URL}")
     print(f"[*] Model: {NVIDIA_MODEL}")
     print(f"[*] Goal: {user_goal}")
@@ -3154,8 +3666,8 @@ def run_nemotron_agent(user_goal: str) -> str:
         print("[!] No NVIDIA_API_KEY detected in environment.")
         print("[!] Running in Automated Intelligent Demonstration Mode (Piecemeal Parallel Model)...\n")
 
-    print("[*] Reading live current ragdoll state from SpacetimeDB...")
-    initial_telem = get_body_telemetry()
+    print(f"[*] Reading live current ragdoll state from SpacetimeDB for NPC {npc_id}...")
+    initial_telem = get_body_telemetry(npc_id)
     telem_data = initial_telem.get("telemetry", {})
     balance_status = initial_telem.get("balance_status", "STABLE_UPRIGHT")
     com_h = telem_data.get("com_height", 1.05)
@@ -3168,7 +3680,7 @@ def run_nemotron_agent(user_goal: str) -> str:
     }
 
     print("[*] Inspecting environment for interactable objects...")
-    scene_objects = get_available_objects()
+    scene_objects = get_available_objects(npc_id)
     if scene_objects:
         print(f"[*] Discovered {len(scene_objects)} interactable object(s) in scene:")
         for obj in scene_objects:
@@ -3181,7 +3693,8 @@ def run_nemotron_agent(user_goal: str) -> str:
         user_goal=user_goal,
         telemetry_data=telem_data,
         client=client,
-        active_model=NVIDIA_MODEL
+        active_model=NVIDIA_MODEL,
+        npc_id=npc_id
     )
 
     # Execute Piecemeal Parallel Pose Synthesis with Dynamic N Slots
@@ -3196,11 +3709,11 @@ def run_nemotron_agent(user_goal: str) -> str:
     # Display Multi-Phase Verification Breakdown
     print_multiphase_summary(multiphase_plan)
 
-    # Execute Trajectory to SpacetimeDB & Unity
+    # Execute Trajectory to SpacetimeDB & Unity Motors targeting npc_id
     print(f"=======================================================")
-    print(f"[*] Executing Verified {len(verified_keyframes)}-Pose Trajectory to Unity Motors via SpacetimeDB")
+    print(f"[*] Executing Verified {len(verified_keyframes)}-Pose Trajectory to Unity Motors for NPC {npc_id} via SpacetimeDB")
     print(f"=======================================================")
-    traj_result = apply_pose_trajectory(user_goal, verified_keyframes)
+    traj_result = apply_pose_trajectory(user_goal, verified_keyframes, npc_id=npc_id, no_await=no_await)
 
     # Final Telemetry Summary
     post_telem = traj_result.get("post_telemetry", {})
@@ -3212,8 +3725,9 @@ def run_nemotron_agent(user_goal: str) -> str:
 
     summary = (
         f"\n=======================================================\n"
-        f"[*] Nemotron Multi-Step Workflow COMPLETED Successfully!\n"
+        f"[*] Nemotron Multi-Step Workflow COMPLETED Successfully for NPC {npc_id}!\n"
         f"- Goal: {user_goal}\n"
+        f"- Target NPC: {npc_id}\n"
         f"- Dynamic Step Budget: {budget_plan['step_count']} steps decided by Nemotron reasoning\n"
         f"- Poses Executed: {traj_result.get('keyframes_executed', len(verified_keyframes))} waypoints\n"
         f"- Reasoning & Planning Latency: {budget_plan.get('planning_latency', 0.0):.2f}s (step budget) + {t_nemotron_elapsed:.2f}s (parallel slots)\n"
@@ -3239,9 +3753,37 @@ def run_demonstration_workflow(user_goal: str) -> str:
 # ==============================================================================
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        goal = " ".join(sys.argv[1:])
-    else:
-        goal = "Wave right hand"
+    import argparse
 
-    result = run_nemotron_agent(goal)
+    parser = argparse.ArgumentParser(description="Nemotron Autonomous Humanoid Motion Controller & Dodgeball Executive Agent")
+    parser.add_argument("goal", nargs="*", help="Motion goal string (e.g. 'Approach dodgeball', 'Wave right hand')")
+    parser.add_argument("--npc-id", "--npc", "--target", dest="npc_id", type=int, default=1, help="Target NPC ID (1 = Blue/South, 2 = Red/North)")
+    parser.add_argument("--executive", action="store_true", help="Run stateless executive function turn")
+    parser.add_argument("--no-await", action="store_true", help="Dispatch trajectory and return immediately without polling wait")
+    parser.add_argument("--state", type=str, default=None, help="Custom state JSON or description to evaluate in executive mode")
+    parser.add_argument("--state-b64", type=str, default=None, help="Base64-encoded state JSON to evaluate in executive mode")
+    parser.add_argument("--match", action="store_true", help="Run autonomous dodgeball match sequence between NPC 1 and NPC 2")
+    parser.add_argument("--worker", action="store_true", help="Run continuous SpacetimeDB worker listening for WebGL client requests")
+
+    args = parser.parse_args()
+
+    if args.worker:
+        from stdb_worker import run_worker_loop
+        run_worker_loop()
+        sys.exit(0)
+
+    state_input = args.state
+    if args.state_b64:
+        try:
+            import base64
+            state_input = base64.b64decode(args.state_b64).decode("utf-8")
+        except Exception as e:
+            print(f"[!] Warning: Failed to decode --state-b64: {e}")
+
+    if args.match:
+        result = run_autonomous_match()
+    elif args.executive or state_input:
+        result = run_nemotron_agent(npc_id=args.npc_id, executive_mode=True, state_input=state_input, no_await=args.no_await)
+    else:
+        goal_text = " ".join(args.goal) if args.goal else "Wave right hand"
+        result = run_nemotron_agent(user_goal=goal_text, npc_id=args.npc_id, no_await=args.no_await)
