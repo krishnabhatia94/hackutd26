@@ -232,6 +232,10 @@ namespace Physics
                 {
                     queueManager.EnqueueTrajectoryFromJson(step.Goal, step.CurrentSubtask, step.StepId);
                 }
+                else if (step.Status == "Ready" || step.Status == "Reset")
+                {
+                    queueManager.StopAndResetToTPose();
+                }
             }
         }
 
