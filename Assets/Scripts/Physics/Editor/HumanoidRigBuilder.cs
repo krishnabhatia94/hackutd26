@@ -214,14 +214,16 @@ namespace Physics.Editor
             IgnoreAdjacentCollisions(pelvisCol, rThighCol);
             IgnoreAdjacentCollisions(rThighCol, rCalfCol);
 
-            // Attach RagdollPoseGoalController and SpacetimeRigController to NPC root
+            // Attach controllers to NPC root
             var goalController = root.AddComponent<RagdollPoseGoalController>();
+            var queueManager = root.AddComponent<DynamicPoseQueueManager>();
             var rigController = root.AddComponent<SpacetimeRigController>();
             rigController.serverUrl = "https://maincloud.spacetimedb.com";
             rigController.databaseName = "knet";
             rigController.npcId = 1;
             rigController.telemetryInterval = 0.1f;
             rigController.poseGoalController = goalController;
+            rigController.queueManager = queueManager;
 
             // Setup Main Camera for optimal framing
             Camera mainCam = Camera.main;

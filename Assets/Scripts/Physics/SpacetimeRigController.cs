@@ -67,6 +67,10 @@ namespace Physics
         private DbConnection _conn;
         private Dictionary<string, BoneTorqueInterpreter> _boneMap = new();
         private Transform _pelvisTransform;
+        [Header("Dynamic Waypoint Queue")]
+        [Tooltip("Dynamic physics-driven pose queue controller")]
+        public DynamicPoseQueueManager queueManager;
+
         private Rigidbody _chestRb;
         private Transform _leftCalfTransform;
         private Transform _rightCalfTransform;
@@ -78,6 +82,22 @@ namespace Physics
         public bool IsConnected => isConnected;
         public bool IsSubscribed => isSubscribed;
 
+        public void EnsureQueueManager()
+        {
+            if (queueManager == null)
+            {
+                queueManager = GetComponent<DynamicPoseQueueManager>();
+                if (queueManager == null)
+                {
+                    queueManager = gameObject.AddComponent<DynamicPoseQueueManager>();
+                }
+            }
+            queueManager.OnTrajectoryFinished -= OnDynamicTrajectoryFinished;
+            queueManager.OnTrajectoryFinished += OnDynamicTrajectoryFinished;
+            queueManager.OnObstacleEncountered -= OnDynamicObstacleEncountered;
+            queueManager.OnObstacleEncountered += OnDynamicObstacleEncountered;
+        }
+
         private void Awake()
         {
             _networkManager = FindObjectOfType<SpacetimeDBNetworkManager>();
@@ -86,6 +106,8 @@ namespace Physics
             {
                 poseGoalController = GetComponent<RagdollPoseGoalController>();
             }
+
+            EnsureQueueManager();
 
             // Index all bone torque controllers on this rig by boneName
             _boneMap.Clear();
@@ -121,11 +143,18 @@ namespace Physics
 
         public void ConnectToSpacetimeDB()
         {
-            if (_conn != null && _conn.IsActive)
+            if (_conn != null)
             {
-                Debug.LogWarning("[SpacetimeRigController] Connection already active.");
-                return;
+                if (_networkManager != null)
+                {
+                    _networkManager.RemoveConnection(_conn);
+                }
+                try { _conn.Disconnect(); } catch {}
+                _conn = null;
             }
+
+            isConnected = false;
+            isSubscribed = false;
 
             Debug.Log($"[SpacetimeRigController] Connecting to SpacetimeDB '{databaseName}' at {serverUrl}...");
 
@@ -139,7 +168,6 @@ namespace Physics
                     .OnDisconnect(OnDisconnected)
                     .Build();
 
-                // Register with network manager if present
                 if (_networkManager != null)
                 {
                     _networkManager.AddConnection(_conn);
@@ -148,6 +176,7 @@ namespace Physics
             catch (Exception ex)
             {
                 Debug.LogError($"[SpacetimeRigController] Failed to build DbConnection: {ex.Message}");
+                TriggerAutoReconnect();
             }
         }
 
@@ -194,36 +223,134 @@ namespace Physics
 
             OnWorkflowUpdated?.Invoke(step);
             Debug.Log($"[SpacetimeRigController] Workflow Step {step.StepId}: {step.Goal} | {step.CurrentSubtask} [{step.Status}]");
+
+            // Check if this step contains a dynamic trajectory queue to execute
+            EnsureQueueManager();
+            if (queueManager != null && !string.IsNullOrEmpty(step.CurrentSubtask))
+            {
+                if (step.Status == "Queued" || step.CurrentSubtask.Contains("bone_targets") || step.CurrentSubtask.Contains("keyframes"))
+                {
+                    queueManager.EnqueueTrajectoryFromJson(step.Goal, step.CurrentSubtask, step.StepId);
+                }
+            }
+        }
+
+        private void OnDynamicTrajectoryFinished(string actionName, bool success, string message)
+        {
+            Debug.Log($"[SpacetimeRigController] Dynamic Trajectory '{actionName}' successfully completed in Unity! Committing holding pose to SpacetimeDB.");
+            if (_conn != null && isConnected)
+            {
+                try
+                {
+                    _conn.Reducers.SetWorkflowStep(latestStepId, actionName, "Dynamic Trajectory Completed", "Completed");
+
+                    // Commit final holding waypoint targets to SpacetimeDB BoneTarget table
+                    if (queueManager != null && queueManager.holdingPose != null)
+                    {
+                        foreach (var kvp in queueManager.holdingPose.boneTargets)
+                        {
+                            var bd = kvp.Value;
+                            float holdKp = Mathf.Max(bd.kp, 25000f);
+                            float holdKd = Mathf.Max(bd.kd, 2000f);
+                            _conn.Reducers.SetPoseKeyframe(bd.boneName, bd.pitch, bd.yaw, bd.roll, holdKp, holdKd, latestStepId);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[SpacetimeRigController] Could not commit completed status to SpacetimeDB: {ex.Message}");
+                }
+            }
+        }
+
+        private void OnDynamicObstacleEncountered(string actionName, string boneName, float errorDeg)
+        {
+            Debug.LogWarning($"[SpacetimeRigController] Obstacle encountered on {boneName} ({errorDeg:F1}°)! Alerting SpacetimeDB.");
+            if (_conn != null && isConnected)
+            {
+                try
+                {
+                    _conn.Reducers.SetWorkflowStep(latestStepId, actionName, $"Blocked by Obstacle on {boneName}", "ObstacleBlocked");
+                }
+                catch {}
+            }
         }
 
         private void OnConnectError(Exception err)
         {
             isConnected = false;
+            isSubscribed = false;
+            _conn = null;
             Debug.LogError($"[SpacetimeRigController] Connection error: {err.Message}");
+            TriggerAutoReconnect();
         }
 
         private void OnDisconnected(DbConnection conn, Exception err)
         {
             isConnected = false;
             isSubscribed = false;
+            _conn = null;
             Debug.LogWarning($"[SpacetimeRigController] Disconnected from SpacetimeDB: {err?.Message}");
+            TriggerAutoReconnect();
+        }
+
+        private void TriggerAutoReconnect()
+        {
+            if (isActiveAndEnabled && gameObject.activeInHierarchy)
+            {
+                StopCoroutine(nameof(ReconnectCoroutine));
+                StartCoroutine(nameof(ReconnectCoroutine));
+            }
+        }
+
+        private IEnumerator ReconnectCoroutine()
+        {
+            yield return new WaitForSeconds(2.0f);
+            if (!isConnected && isActiveAndEnabled)
+            {
+                Debug.Log("[SpacetimeRigController] Auto-reconnecting to SpacetimeDB...");
+                ConnectToSpacetimeDB();
+            }
+        }
+
+        [ContextMenu("Reset Humanoid to T-Pose")]
+        public void ResetToTPose()
+        {
+            if (poseGoalController != null)
+            {
+                poseGoalController.ApplyStandingTPose();
+            }
+            if (queueManager != null)
+            {
+                queueManager.StopAndResetToTPose();
+            }
+            if (_conn != null && isConnected)
+            {
+                foreach (var kvp in _boneMap)
+                {
+                    string bname = kvp.Key;
+                    float kp = (bname == "Pelvis" || bname == "Spine" || bname == "Chest") ? 25000f : 20000f;
+                    float kd = (bname == "Pelvis" || bname == "Spine" || bname == "Chest") ? 1500f : 1000f;
+                    try
+                    {
+                        _conn.Reducers.SetPoseKeyframe(bname, 0f, 0f, 0f, kp, kd, 0);
+                    }
+                    catch {}
+                }
+                try
+                {
+                    _conn.Reducers.SetWorkflowStep(0, "Upright Standing T-Pose (Default)", "Neutral Balance", "Ready");
+                }
+                catch {}
+            }
+            Debug.Log("[SpacetimeRigController] Humanoid rig reset to neutral Upright Standing T-Pose.");
         }
 
         private void OnSubscriptionApplied(SubscriptionEventContext ctx)
         {
             isSubscribed = true;
-            Debug.Log("[SpacetimeRigController] Initial subscription snapshot applied. Replaying tables...");
-
-            // Apply all existing bone targets in database cache
-            foreach (var target in _conn.Db.BoneTarget.Iter())
-            {
-                ApplyBoneTarget(target);
-            }
-
-            foreach (var step in _conn.Db.AgentWorkflowStep.Iter())
-            {
-                UpdateWorkflowStep(step);
-            }
+            Debug.Log("[SpacetimeRigController] Initial subscription applied. Ensuring humanoid starts in clean T-Pose...");
+            ResetToTPose();
         }
 
         private void OnBoneTargetInserted(EventContext ctx, BoneTarget row)
@@ -243,6 +370,7 @@ namespace Physics
             if (_boneMap.TryGetValue(target.BoneName, out var interpreter))
             {
                 interpreter.SetTargetAndGains(target.Pitch, target.Yaw, target.Roll, target.Kp, target.Kd);
+                Debug.Log($"[SpacetimeRigController] Target applied: {target.BoneName} -> pitch={target.Pitch:F1}, yaw={target.Yaw:F1}, roll={target.Roll:F1} (KF {target.KeyframeId})");
             }
 
             if (poseGoalController != null)

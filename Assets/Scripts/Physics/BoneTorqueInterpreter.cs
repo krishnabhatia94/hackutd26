@@ -38,7 +38,7 @@ namespace Physics
         public float maxTorque = 100000f;
 
         [Tooltip("Maximum angular velocity of setpoint transition in degrees/second. Prevents instant mechanical snapping.")]
-        public float maxAngularSpeed = 180f;
+        public float maxAngularSpeed = 360f;
 
         [Tooltip("Enable or disable active drive.")]
         public bool applyTorque = true;
@@ -52,6 +52,8 @@ namespace Physics
         private bool _hasInitDriveRot = false;
 
         public Vector3 CurrentErrorEuler => currentErrorEuler;
+        public float CurrentAngularError => Quaternion.Angle(transform.localRotation, Quaternion.Euler(targetPitch, targetYaw, targetRoll));
+        public float CurrentAngularSpeed => _rb != null ? _rb.angularVelocity.magnitude : 0f;
 
         private void Reset()
         {
