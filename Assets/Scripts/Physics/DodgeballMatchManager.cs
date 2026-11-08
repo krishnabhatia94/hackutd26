@@ -44,8 +44,6 @@ namespace Physics
 
         [Header("Live Match Telemetry (Read-Only)")]
         public string matchState = "Idle / Ready";
-        public int blueTeamHits = 0;
-        public int redTeamHits = 0;
         public int dummy1Hits = 0;
         public int dummy2Hits = 0;
         public bool isMatchRunning = false;
@@ -75,92 +73,10 @@ namespace Physics
 
         private void Awake()
         {
-            PreserveAndSetupCamera();
-            CleanLegacyDummies();
+            FindRagdollReferences();
             CacheInitialTransforms();
             EnsureUIHierarchy();
             ApplyCourtAndTeamColors();
-
-            if (GetComponent<SpacetimeNetworkSpawner>() == null && FindObjectOfType<SpacetimeNetworkSpawner>() == null)
-            {
-                gameObject.AddComponent<SpacetimeNetworkSpawner>();
-            }
-        }
-
-        private void PreserveAndSetupCamera()
-        {
-            // Unparent any camera attached inside legacy dummies BEFORE destroying them!
-            var allDummies = new[] { "HumanoidRig_Team1", "HumanoidRig_Team2", "HumanoidRig", "HumanoidRig (1)" };
-            foreach (var dummyName in allDummies)
-            {
-                var dGo = GameObject.Find(dummyName);
-                if (dGo != null)
-                {
-                    var cams = dGo.GetComponentsInChildren<Camera>(true);
-                    foreach (var c in cams)
-                    {
-                        c.transform.SetParent(null, true);
-                        c.name = "Main Camera";
-                        c.tag = "MainCamera";
-                        c.enabled = true;
-                        dummy1Camera = c;
-                    }
-                }
-            }
-
-            if (dummy1Camera == null)
-            {
-                var camGo = GameObject.Find("Main Camera");
-                if (camGo != null) dummy1Camera = camGo.GetComponent<Camera>();
-                if (dummy1Camera == null) dummy1Camera = Camera.main;
-            }
-
-            if (spectatorCamera == null)
-            {
-                var specGo = GameObject.Find("Spectator_Broadcast_Camera");
-                if (specGo == null) specGo = GameObject.Find("SpectatorCamera");
-                if (specGo != null) spectatorCamera = specGo.GetComponent<Camera>();
-            }
-
-            if (dummy1Camera == null)
-            {
-                if (spectatorCamera != null)
-                {
-                    dummy1Camera = spectatorCamera;
-                    dummy1Camera.tag = "MainCamera";
-                    dummy1Camera.enabled = true;
-                }
-                else
-                {
-                    GameObject camGo = new GameObject("Main Camera");
-                    camGo.tag = "MainCamera";
-                    camGo.transform.position = new Vector3(0f, 8f, -14f);
-                    camGo.transform.rotation = Quaternion.Euler(24f, 0f, 0f);
-                    dummy1Camera = camGo.AddComponent<Camera>();
-                    dummy1Camera.fieldOfView = 60f;
-                    dummy1Camera.nearClipPlane = 0.3f;
-                    dummy1Camera.farClipPlane = 1000f;
-                    camGo.AddComponent<AudioListener>();
-                    dummy1Camera.enabled = true;
-                }
-            }
-            else
-            {
-                dummy1Camera.enabled = true;
-                if (dummy1Camera.transform.parent == null)
-                {
-                    dummy1Camera.transform.position = new Vector3(0f, 8f, -14f);
-                    dummy1Camera.transform.rotation = Quaternion.Euler(24f, 0f, 0f);
-                }
-            }
-        }
-
-        private void CleanLegacyDummies()
-        {
-            var legacy1 = GameObject.Find("HumanoidRig_Team1");
-            if (legacy1 != null) DestroyImmediate(legacy1);
-            var legacy2 = GameObject.Find("HumanoidRig_Team2");
-            if (legacy2 != null) DestroyImmediate(legacy2);
         }
 
         private void Start()
@@ -168,77 +84,34 @@ namespace Physics
             FindRagdollReferences();
             SubscribeProjectileHits();
             ApplyCourtAndTeamColors();
-            SetMatchState("Arena Ready");
-            UpdateScoreUI();
+            SetMatchState("Arena Ready! Click 'Start Dodgeball Match'");
         }
 
         private void Update()
         {
-            // Continuously update top HUD to display ONLY your dummy's thought process
-            UpdateLocalDummyThoughtHUD();
-        }
-
-        private void UpdateLocalDummyThoughtHUD()
-        {
-            if (_statusText == null) return;
-
-            uint localId = 1;
-            GameObject localRig = null;
-
-            if (SpacetimeNetworkSpawner.Instance != null && SpacetimeNetworkSpawner.Instance.isRegistered)
+            // Keyboard shortcut 'C' for camera toggle
+            if (Input.GetKeyDown(KeyCode.C))
             {
-                localId = SpacetimeNetworkSpawner.Instance.localNpcId;
-                localRig = SpacetimeNetworkSpawner.Instance.GetSpawnedRagdoll(localId);
-            }
-            else
-            {
-                var localUI = FindObjectOfType<UI.PlayerMotionControllerUI>();
-                if (localUI != null && localUI.localRagdoll != null)
-                {
-                    localId = localUI.localNpcId;
-                    localRig = localUI.localRagdoll;
-                }
+                ToggleCamera();
             }
 
-            if (localRig != null)
+            // Keyboard shortcut 'Space' to start match if idle
+            if (Input.GetKeyDown(KeyCode.Space) && !isMatchRunning)
             {
-                var exec = localRig.GetComponent<RagdollExecutiveAgent>();
-                var queue = localRig.GetComponent<DynamicPoseQueueManager>();
+                StartDodgeballMatch();
+            }
 
-                string myState = "Idle";
-                if (exec != null && exec.currentState != ExecutiveState.Dormant)
-                {
-                    myState = exec.currentState.ToString();
-                }
-                else if (queue != null && queue.isExecuting)
-                {
-                    myState = "Executing";
-                }
-
-                string myGoal = "Observing match";
-                if (exec != null && !string.IsNullOrEmpty(exec.currentActionGoal) && exec.currentActionGoal != "Idle / Dormant")
-                {
-                    myGoal = exec.currentActionGoal;
-                }
-                else if (queue != null && !string.IsNullOrEmpty(queue.activeActionName))
-                {
-                    myGoal = queue.activeActionName;
-                }
-
-                string teamName = (localId % 2 != 0) ? "BLUE TEAM" : "RED TEAM";
-                string hudMsg = $"YOUR DUMMY [{teamName} - NPC {localId}]: {myState}   |   THOUGHT: \"{myGoal}\"";
-
-                if (_statusText.text != hudMsg)
+            // Update live telemetry HUD of both independent executive agents
+            if (isMatchRunning)
+            {
+                string s1 = _executive1 != null ? _executive1.currentState.ToString() : (_queue1 != null && _queue1.isExecuting ? "Executing" : "Idle");
+                string s2 = _executive2 != null ? _executive2.currentState.ToString() : (_queue2 != null && _queue2.isExecuting ? "Executing" : "Idle");
+                string g1 = _executive1 != null ? _executive1.currentActionGoal : "";
+                string g2 = _executive2 != null ? _executive2.currentActionGoal : "";
+                string hudMsg = $"BLUE [NPC 1]: {s1} ({g1})   |   RED [NPC 2]: {s2} ({g2})";
+                if (_statusText != null && _statusText.text != hudMsg)
                 {
                     _statusText.text = hudMsg;
-                }
-            }
-            else
-            {
-                string connectingMsg = "YOUR DUMMY: Connecting to SpacetimeDB & joining match...";
-                if (_statusText.text != connectingMsg)
-                {
-                    _statusText.text = connectingMsg;
                 }
             }
         }
@@ -247,13 +120,9 @@ namespace Physics
         {
             if (dummy1 == null) dummy1 = GameObject.Find("HumanoidRig");
             if (dummy1 == null) dummy1 = GameObject.Find("HumanoidRig_Team1");
-            if (dummy1 == null && SpacetimeNetworkSpawner.Instance != null)
-                dummy1 = SpacetimeNetworkSpawner.Instance.GetSpawnedRagdoll(1);
 
             if (dummy2 == null) dummy2 = GameObject.Find("HumanoidRig_Team2");
             if (dummy2 == null) dummy2 = GameObject.Find("HumanoidRig (1)");
-            if (dummy2 == null && SpacetimeNetworkSpawner.Instance != null)
-                dummy2 = SpacetimeNetworkSpawner.Instance.GetSpawnedRagdoll(2);
 
             if (dummy1 != null)
             {
@@ -347,30 +216,30 @@ namespace Physics
 
         private void HandleProjectileHit(RagdollFaceController hitRagdoll, Collision col)
         {
+            if (_face1 == null || _face2 == null)
+            {
+                FindRagdollReferences();
+            }
+
             if (hitRagdoll != null)
             {
-                bool isBlue = false;
-                var rigCtrl = hitRagdoll.GetComponentInParent<SpacetimeRigController>();
-                if (rigCtrl != null)
-                {
-                    isBlue = (rigCtrl.npcId % 2 != 0);
-                }
-                else
-                {
-                    isBlue = hitRagdoll.name.Contains("Blue") || hitRagdoll.name.Contains("Team1") || hitRagdoll.transform.position.z < 0f;
-                }
+                bool isDummy1 = (hitRagdoll == _face1) ||
+                                (dummy1 != null && (hitRagdoll.gameObject == dummy1 || hitRagdoll.transform.IsChildOf(dummy1.transform))) ||
+                                hitRagdoll.name.Contains("Team1");
 
-                if (isBlue)
+                bool isDummy2 = (hitRagdoll == _face2) ||
+                                (dummy2 != null && (hitRagdoll.gameObject == dummy2 || hitRagdoll.transform.IsChildOf(dummy2.transform))) ||
+                                hitRagdoll.name.Contains("Team2");
+
+                if (isDummy1)
                 {
-                    blueTeamHits++;
-                    dummy1Hits = blueTeamHits;
-                    Debug.Log($"[DodgeballMatchManager] Blue Team competitor STRUCK by Dodgeball! Total Blue Hits: {blueTeamHits}");
+                    dummy1Hits++;
+                    Debug.Log($"[DodgeballMatchManager] Dummy 1 (Team Blue) STRUCK by Dodgeball! Hits: {dummy1Hits}");
                 }
-                else
+                else if (isDummy2)
                 {
-                    redTeamHits++;
-                    dummy2Hits = redTeamHits;
-                    Debug.Log($"[DodgeballMatchManager] Red Team competitor STRUCK by Dodgeball! Total Red Hits: {redTeamHits}");
+                    dummy2Hits++;
+                    Debug.Log($"[DodgeballMatchManager] Dummy 2 (Team Red) STRUCK by Dodgeball! Hits: {dummy2Hits}");
                 }
 
                 UpdateScoreUI();
@@ -590,6 +459,10 @@ namespace Physics
         private void SetMatchState(string msg)
         {
             matchState = msg;
+            if (_statusText != null)
+            {
+                _statusText.text = msg;
+            }
             Debug.Log($"[DodgeballMatchManager] {msg}");
         }
 
@@ -597,7 +470,7 @@ namespace Physics
         {
             if (_scoreText != null)
             {
-                _scoreText.text = $"BLUE TEAM HITS: {blueTeamHits}   |   RED TEAM HITS: {redTeamHits}";
+                _scoreText.text = $"DUMMY 1 (BLUE): {dummy1Hits} HITS   |   DUMMY 2 (RED): {dummy2Hits} HITS";
             }
         }
 
@@ -766,13 +639,32 @@ namespace Physics
 
         private void EnsureUIHierarchy()
         {
-            Canvas canvas = UI.PlayerMotionControllerUI.GetOrCreateGameCanvas();
-
-            // Destroy any existing top panels to prevent duplicate overlapping UIs
-            var existingTop = canvas.transform.Find("CourtTopPanel");
-            if (existingTop != null)
+            Canvas canvas = GetComponentInParent<Canvas>();
+            if (canvas == null)
             {
-                DestroyImmediate(existingTop.gameObject);
+                var existingCanvas = GameObject.Find("DodgeballCourtCanvas");
+                if (existingCanvas != null)
+                {
+                    canvas = existingCanvas.GetComponent<Canvas>();
+                }
+            }
+
+            if (canvas == null)
+            {
+                GameObject canvasGo = new GameObject("DodgeballCourtCanvas");
+                canvas = canvasGo.AddComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                var scaler = canvasGo.AddComponent<CanvasScaler>();
+                scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+                scaler.referenceResolution = new Vector2(1920, 1080);
+                canvasGo.AddComponent<GraphicRaycaster>();
+
+                if (FindObjectOfType<UnityEngine.EventSystems.EventSystem>() == null)
+                {
+                    GameObject es = new GameObject("EventSystem");
+                    es.AddComponent<UnityEngine.EventSystems.EventSystem>();
+                    es.AddComponent<UnityEngine.EventSystems.StandaloneInputModule>();
+                }
             }
 
             BuildCourtHUD(canvas.gameObject);
@@ -803,28 +695,58 @@ namespace Physics
             titleRect.sizeDelta = new Vector2(800f, 30f);
             titleGo.GetComponent<Text>().alignment = TextAnchor.MiddleCenter;
 
-            // Score (Team Hits)
-            GameObject scoreGo = CreateTextObject(topPanel, "Score", "BLUE TEAM HITS: 0   |   RED TEAM HITS: 0", defaultFont, 16, FontStyle.Bold, Color.white);
+            // Score
+            GameObject scoreGo = CreateTextObject(topPanel, "Score", "DUMMY 1 (BLUE): 0 HITS   |   DUMMY 2 (RED): 0 HITS", defaultFont, 16, FontStyle.Bold, Color.white);
             RectTransform scoreRect = scoreGo.GetComponent<RectTransform>();
             scoreRect.anchoredPosition = new Vector2(0f, -48f);
             scoreRect.sizeDelta = new Vector2(800f, 25f);
             _scoreText = scoreGo.GetComponent<Text>();
             _scoreText.alignment = TextAnchor.MiddleCenter;
 
-            // Match Status / Local Dummy Thought Process
-            GameObject statusGo = CreateTextObject(topPanel, "Status", "YOUR DUMMY: Connecting to arena...", defaultFont, 14, FontStyle.Normal, Color.cyan);
+            // Match Status
+            GameObject statusGo = CreateTextObject(topPanel, "Status", "Arena Ready! Click 'Start Dodgeball Match'", defaultFont, 14, FontStyle.Normal, Color.cyan);
             RectTransform statusRect = statusGo.GetComponent<RectTransform>();
             statusRect.anchoredPosition = new Vector2(0f, -80f);
             statusRect.sizeDelta = new Vector2(800f, 25f);
             _statusText = statusGo.GetComponent<Text>();
             _statusText.alignment = TextAnchor.MiddleCenter;
 
-            // Clean up any legacy CourtButtonsPanel if it exists from previous scene instances
-            Transform legacyPanel = parent.transform.Find("CourtButtonsPanel");
-            if (legacyPanel != null)
-            {
-                DestroyImmediate(legacyPanel.gameObject);
-            }
+            // Bottom Buttons Panel
+            GameObject btnPanel = new GameObject("CourtButtonsPanel");
+            btnPanel.transform.SetParent(parent.transform, false);
+            RectTransform btnRect = btnPanel.AddComponent<RectTransform>();
+            btnRect.anchorMin = new Vector2(0.5f, 0f);
+            btnRect.anchorMax = new Vector2(0.5f, 0f);
+            btnRect.pivot = new Vector2(0.5f, 0f);
+            btnRect.anchoredPosition = new Vector2(0f, 25f);
+            btnRect.sizeDelta = new Vector2(760f, 75f);
+
+            Image btnImg = btnPanel.AddComponent<Image>();
+            btnImg.color = new Color(0.06f, 0.08f, 0.12f, 0.85f);
+
+            // Start Match Button
+            GameObject startBtnGo = CreateButtonObject(btnPanel, "StartMatchButton", "START DODGEBALL MATCH", defaultFont, 16, new Color(0.12f, 0.65f, 0.28f, 1f));
+            RectTransform startBtnRect = startBtnGo.GetComponent<RectTransform>();
+            startBtnRect.anchoredPosition = new Vector2(-230f, 0f);
+            startBtnRect.sizeDelta = new Vector2(250f, 50f);
+            _startMatchBtn = startBtnGo.GetComponent<Button>();
+            _startMatchBtn.onClick.AddListener(StartDodgeballMatch);
+
+            // Reset Match Button
+            GameObject resetBtnGo = CreateButtonObject(btnPanel, "ResetButton", "RESET MATCH", defaultFont, 14, new Color(0.75f, 0.22f, 0.22f, 1f));
+            RectTransform resetBtnRect = resetBtnGo.GetComponent<RectTransform>();
+            resetBtnRect.anchoredPosition = new Vector2(40f, 0f);
+            resetBtnRect.sizeDelta = new Vector2(170f, 50f);
+            _resetBtn = resetBtnGo.GetComponent<Button>();
+            _resetBtn.onClick.AddListener(ResetMatch);
+
+            // Toggle Camera Button
+            GameObject camBtnGo = CreateButtonObject(btnPanel, "CamToggleButton", "TOGGLE CAMERA [C]", defaultFont, 14, new Color(0.18f, 0.42f, 0.72f, 1f));
+            RectTransform camBtnRect = camBtnGo.GetComponent<RectTransform>();
+            camBtnRect.anchoredPosition = new Vector2(245f, 0f);
+            camBtnRect.sizeDelta = new Vector2(190f, 50f);
+            _camToggleBtn = camBtnGo.GetComponent<Button>();
+            _camToggleBtn.onClick.AddListener(ToggleCamera);
         }
 
         private GameObject CreateTextObject(GameObject parent, string name, string text, Font font, int size, FontStyle style, Color color)

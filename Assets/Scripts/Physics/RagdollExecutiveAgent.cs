@@ -376,17 +376,6 @@ namespace Physics
                 pelvisPos.x, pelvisPos.y, pelvisPos.z
             );
 
-            // Base64 encode JSON to guarantee zero command line quoting issues on Windows
-            string b64State = Convert.ToBase64String(Encoding.UTF8.GetBytes(stateJson));
-
-#if UNITY_WEBGL
-            // In WebGL sandbox, subprocesses cannot run; dispatch executive turn request directly to SpacetimeDB
-            if (_rigController != null)
-            {
-                _rigController.DispatchMotionPrompt("Executive Decision", "executive_turn");
-            }
-            _isQueryRunning = false;
-#else
             // Execute in background ThreadPool to keep Unity main thread smooth
             ThreadPool.QueueUserWorkItem(_ =>
             {
@@ -396,18 +385,13 @@ namespace Physics
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogWarning($"[RagdollExecutiveAgent-{npcId}] Subprocess unavailable ({ex.Message}), falling back to SpacetimeDB dispatch.");
-                    if (_rigController != null)
-                    {
-                        _rigController.DispatchMotionPrompt("Executive Decision", "executive_turn");
-                    }
+                    Debug.LogError($"[RagdollExecutiveAgent-{npcId}] Error in executive subprocess: {ex.Message}");
                 }
                 finally
                 {
                     _isQueryRunning = false;
                 }
             });
-#endif
         }
 
         private void ExecuteAgentSubprocess(string stateJson)

@@ -317,37 +317,6 @@ namespace Physics
             }
         }
 
-        /// <summary>
-        /// Dispatches a motion sequence prompt (max 80 chars) to SpacetimeDB to be picked up
-        /// by Nemotron / agent.py.
-        /// </summary>
-        public void DispatchMotionPrompt(string prompt, string requestType = "motion_prompt")
-        {
-            if (string.IsNullOrWhiteSpace(prompt)) return;
-            if (prompt.Length > 80) prompt = prompt.Substring(0, 80);
-
-            uint stepId = (uint)UnityEngine.Random.Range(100000, 999999);
-            string cleanPrompt = prompt.Replace("\"", "'");
-            string subtaskJson = $"{{\"target_npc_id\":{npcId},\"request_type\":\"{requestType}\",\"prompt\":\"{cleanPrompt}\"}}";
-
-            if (_conn != null && isConnected)
-            {
-                try
-                {
-                    _conn.Reducers.SetWorkflowStep(stepId, $"[NPC {npcId}] {cleanPrompt}", subtaskJson, "Requested");
-                    Debug.Log($"[SpacetimeRigController-{npcId}] Dispatched prompt '{cleanPrompt}' to SpacetimeDB as Step #{stepId}.");
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[SpacetimeRigController-{npcId}] Failed to dispatch workflow step: {ex.Message}");
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"[SpacetimeRigController-{npcId}] SpacetimeDB not connected; unable to dispatch prompt '{cleanPrompt}'.");
-            }
-        }
-
         private void OnConnectError(Exception err)
         {
             isConnected = false;
@@ -499,9 +468,6 @@ namespace Physics
                     if (obj == null) continue;
                     var (offset, dist, bearing) = obj.GetTelemetryRelativeTo(refTr);
                     bool isHeld = obj.isHeld || (_pickupController != null && _pickupController.isHolding && _pickupController.heldObject == obj);
-                    var proj = obj.GetComponent<ObstacleProjectile>();
-                    bool isAirborne = proj != null && proj.isAirborne;
-
                     if (!first) sb.Append(",");
                     first = false;
                     sb.Append("{");
@@ -509,7 +475,6 @@ namespace Physics
                     sb.Append($"\"type\":\"{obj.interactType}\",");
                     sb.Append($"\"description\":\"{obj.description}\",");
                     sb.Append($"\"is_held\":{(isHeld ? "true" : "false")},");
-                    sb.Append($"\"is_airborne\":{(isAirborne ? "true" : "false")},");
                     sb.Append($"\"held_by_npc_id\":{obj.heldByNpcId},");
                     sb.Append(string.Format(CultureInfo.InvariantCulture, "\"world_pos\":[{0:F2},{1:F2},{2:F2}],", obj.transform.position.x, obj.transform.position.y, obj.transform.position.z));
                     sb.Append(string.Format(CultureInfo.InvariantCulture, "\"distance\":{0:F2},", dist));

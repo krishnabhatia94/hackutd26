@@ -3763,14 +3763,8 @@ if __name__ == "__main__":
     parser.add_argument("--state", type=str, default=None, help="Custom state JSON or description to evaluate in executive mode")
     parser.add_argument("--state-b64", type=str, default=None, help="Base64-encoded state JSON to evaluate in executive mode")
     parser.add_argument("--match", action="store_true", help="Run autonomous dodgeball match sequence between NPC 1 and NPC 2")
-    parser.add_argument("--worker", action="store_true", help="Run continuous SpacetimeDB worker listening for WebGL client requests")
 
     args = parser.parse_args()
-
-    if args.worker:
-        from stdb_worker import run_worker_loop
-        run_worker_loop()
-        sys.exit(0)
 
     state_input = args.state
     if args.state_b64:
